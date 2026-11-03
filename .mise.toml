@@ -1,0 +1,6 @@
+# Бинарные инструменты проверок — здесь, а не npm-обёртками с докачкой на postinstall (linting.md).
+[tools]
+ast-grep = "0.51.0"
+betterleaks = "1.9.0"
+osv-scanner = "2.7.0"
+"github:agent-sh/agnix" = "0.59.3"

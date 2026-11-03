@@ -1,0 +1,12 @@
+id: no-iterator-chain
+valid:
+  - 'const ids = items.map((item) => item.id);'
+  - 'const ready = items.filter(isReady);'
+  - 'const total = items.reduce((sum, item) => sum + item.size, 0);'
+  - 'const first = items.filter(isReady).find(isFirst);'
+  - 'const sorted = items.slice().sort(byName);'
+invalid:
+  - 'const options = fonts.filter(isReady).map(toOption);'
+  - 'const names = rows.map(toName).filter(Boolean);'
+  - 'const flat = groups.flatMap(toItems).map(toKey);'
+  - 'const twice = list.filter(a).filter(b);'

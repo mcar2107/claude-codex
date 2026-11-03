@@ -1,0 +1,13 @@
+tools = ["claude-code"]
+
+[files]
+exclude = [
+  # Исходники upstream и сборки — не конфиг агента.
+  "vendor/**",
+  "dist/**",
+  "node_modules/**",
+  "artifacts/**",
+  # Локальный state и рабочие каталоги — в .gitignore.
+  ".runtime/**",
+  ".work/**",
+]

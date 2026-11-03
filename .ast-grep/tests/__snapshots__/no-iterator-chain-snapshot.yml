@@ -1,0 +1,106 @@
+id: no-iterator-chain
+snapshots:
+  const flat = groups.flatMap(toItems).map(toKey);:
+    labels:
+      - source: groups.flatMap(toItems).map(toKey)
+        style: primary
+        start: 13
+        end: 47
+      - source: map
+        style: secondary
+        start: 37
+        end: 40
+      - source: flatMap
+        style: secondary
+        start: 20
+        end: 27
+      - source: groups.flatMap
+        style: secondary
+        start: 13
+        end: 27
+      - source: groups.flatMap(toItems)
+        style: secondary
+        start: 13
+        end: 36
+      - source: groups.flatMap(toItems).map
+        style: secondary
+        start: 13
+        end: 40
+  const names = rows.map(toName).filter(Boolean);:
+    labels:
+      - source: rows.map(toName).filter(Boolean)
+        style: primary
+        start: 14
+        end: 46
+      - source: filter
+        style: secondary
+        start: 31
+        end: 37
+      - source: map
+        style: secondary
+        start: 19
+        end: 22
+      - source: rows.map
+        style: secondary
+        start: 14
+        end: 22
+      - source: rows.map(toName)
+        style: secondary
+        start: 14
+        end: 30
+      - source: rows.map(toName).filter
+        style: secondary
+        start: 14
+        end: 37
+  const options = fonts.filter(isReady).map(toOption);:
+    labels:
+      - source: fonts.filter(isReady).map(toOption)
+        style: primary
+        start: 16
+        end: 51
+      - source: map
+        style: secondary
+        start: 38
+        end: 41
+      - source: filter
+        style: secondary
+        start: 22
+        end: 28
+      - source: fonts.filter
+        style: secondary
+        start: 16
+        end: 28
+      - source: fonts.filter(isReady)
+        style: secondary
+        start: 16
+        end: 37
+      - source: fonts.filter(isReady).map
+        style: secondary
+        start: 16
+        end: 41
+  const twice = list.filter(a).filter(b);:
+    labels:
+      - source: list.filter(a).filter(b)
+        style: primary
+        start: 14
+        end: 38
+      - source: filter
+        style: secondary
+        start: 29
+        end: 35
+      - source: filter
+        style: secondary
+        start: 19
+        end: 25
+      - source: list.filter
+        style: secondary
+        start: 14
+        end: 25
+      - source: list.filter(a)
+        style: secondary
+        start: 14
+        end: 28
+      - source: list.filter(a).filter
+        style: secondary
+        start: 14
+        end: 35

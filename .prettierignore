@@ -1,0 +1,15 @@
+node_modules
+dist
+artifacts
+bin
+licenses
+.runtime
+.work
+package-lock.json
+THIRD_PARTY_LICENSES.txt
+
+# Исходники upstream байт в байт: хеши сверяет vendor/ccr/original-sha256.json.
+vendor
+
+# Документация свёрстана руками, Prettier ломает выравнивание таблиц.
+*.md

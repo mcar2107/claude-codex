@@ -1,0 +1,31 @@
+[extend]
+useDefault = true
+
+# Исключения — точечные, по пути и значению, всегда с причиной. vendor/ccr — исходники upstream байт
+# в байт (хеши в vendor/ccr/original-sha256.json), правка ради проверки разошлась бы с хешами.
+
+[[allowlists]]
+description = "SHA-256 исходников upstream: имя файла с auth/token и hex-хеш похожи на ключ"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''^vendor/ccr/original-sha256\.json$''']
+regexTarget = "secret"
+regexes = ['''^[0-9a-f]{64}$''']
+
+[[allowlists]]
+description = "Значение enum типа поля пресета upstream, а не пароль"
+targetRules = ["generic-password"]
+condition = "AND"
+paths = ['''^vendor/ccr/shared/src/preset/types\.ts$''']
+regexTarget = "secret"
+regexes = ['''^password$''']
+
+# OAuth client secret Google для installed app (Antigravity) открыт по дизайну: он лежит в каждом
+# дистрибутиве клиента и в публичном репозитории upstream и не даёт доступа без согласия пользователя.
+[[allowlists]]
+description = "Публичный client secret installed-app OAuth Antigravity в коде upstream"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''^vendor/ccr/core/src/utils/antigravity-auth\.ts$''']
+regexTarget = "secret"
+regexes = ['''^GOCSPX-[A-Za-z0-9_-]+$''']

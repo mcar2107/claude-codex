@@ -1,0 +1,9 @@
+# Исключения — только с причиной и сроком: после `ignoreUntil` проверка снова падает.
+
+# minimatch 10 тянут eslint и typescript-eslint (только dev): DoS через раздувание glob-шаблона, а
+# шаблоны здесь — из наших конфигов, не из чужого ввода. Исправление — в minimatch 11, на который
+# eslint 10.13 и typescript-eslint 8.72 ещё не перешли. К сроку — обновить их.
+[[IgnoredVulns]]
+id = "GHSA-g3hv-75wg-m249"
+ignoreUntil = 2027-02-28
+reason = "minimatch 10 в dev-цепочке eslint: шаблоны только из конфигов проекта, исправление — в minimatch 11"

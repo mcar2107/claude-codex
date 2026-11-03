@@ -1,0 +1,28 @@
+# Два метода-итератора подряд — два прохода и промежуточный массив: правило #15 code-style.md
+# сворачивает их в один reduce.
+id: no-iterator-chain
+language: typescript
+severity: error
+message: 'Цепочка методов-итераторов — сверни в один reduce (code-style.md, #15)'
+ignores:
+  - vendor/**
+  - node_modules/**
+  - dist/**
+rule:
+  kind: call_expression
+  has:
+    field: function
+    kind: member_expression
+    all:
+      - has:
+          field: property
+          regex: ^(filter|map|flatMap)$
+      - has:
+          field: object
+          kind: call_expression
+          has:
+            field: function
+            kind: member_expression
+            has:
+              field: property
+              regex: ^(filter|map|flatMap)$

@@ -1,0 +1,28 @@
+{
+  /**
+   * Проверка типов и typed-lint своего TypeScript (`src/transport/*.ts`). Код vendor/ccr попадает в
+   * проверку транзитивно — через импорты адаптера, — поэтому алиасы повторяют подмены
+   * scripts/build.cjs: `@/…` → vendor/ccr/core/src, `@caeliq/ccr-shared` → адаптер.
+   */
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "lib": ["ES2023", "DOM"],
+    "types": ["node"],
+    "strict": true,
+    "noEmit": true,
+    "allowJs": true,
+    "checkJs": false,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "paths": {
+      "@/transformer": ["./src/transport/registry.ts"],
+      "@/*": ["./vendor/ccr/core/src/*"],
+      "@caeliq/ccr-shared": ["./src/transport/shared.ts"]
+    }
+  },
+  "include": ["src/**/*.ts"]
+}

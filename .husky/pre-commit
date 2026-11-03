@@ -1,0 +1,11 @@
+# Гейт коммита: параллельная проверка staged-файлов (lint-staged), типов (tsc), офлайн-тестов и
+# секретов в staged-изменениях — шаги независимы.
+#
+# Бинарные инструменты проверок (ast-grep, betterleaks) ставит mise по .mise.toml, недостающий
+# `mise x` доставит сам. Без mise хук упал бы голым «command not found» — падаем с подсказкой.
+if ! command -v mise >/dev/null 2>&1; then
+  echo 'pre-commit: нужен mise (https://mise.jdx.dev), затем `mise install` — инструменты проверок ставятся по .mise.toml' >&2
+  exit 1
+fi
+
+npx concurrently --kill-others-on-fail "npx lint-staged" "npm run typecheck" "npm test" "mise x -- betterleaks git --pre-commit --staged --redact -v --no-banner" || exit 1

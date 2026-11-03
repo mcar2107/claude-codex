@@ -7,3 +7,6 @@ artifacts/
 # Generated: local launchers with absolute paths (install.cjs) and build license bundle.
 bin/
 THIRD_PARTY_LICENSES.txt
+
+# Кэш eslint (`npm run lint:es`).
+.eslintcache

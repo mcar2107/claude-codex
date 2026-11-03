@@ -1,0 +1,66 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema-jsonc.json",
+  "entry": [
+    "src/cli.cjs",
+    "scripts/*.cjs",
+    "tests/*.cjs",
+    /**
+     * Старый путь claude-gpt* — запуск и откат через корневые скрипты: каждый — своя точка входа.
+     */
+    "*.cjs",
+    /**
+     * Адаптер для vendor/ccr: эти файлы подставляет плагин scripts/build.cjs вместо модулей upstream
+     * (`@/transformer`, `@caeliq/ccr-shared`, `tiktoken`, воркер подсчёта токенов). Их импортирует
+     * код vendor, который Knip не разбирает, поэтому они — точки входа.
+     */
+    "src/transport/registry.ts",
+    "src/transport/shared.ts",
+    "src/transport/token-count.ts",
+    "src/transport/tiktoken.cjs",
+  ],
+  "project": ["*.cjs", "src/**/*.{cjs,ts}", "scripts/**/*.cjs", "tests/**/*.cjs"],
+  "ignoreIssues": {
+    /**
+     * Knip не прослеживает обращения к свойствам объекта `module.exports` (`state.requireAuth()`,
+     * ленивый `require('./auth.cjs').status()`): экспорты CommonJS он считал бы мёртвыми все.
+     */
+    "**/*.cjs": ["exports"],
+  },
+  "ignoreDependencies": [
+    /**
+     * Зависимости исходников vendor/ccr: в бандл их тянет код upstream, который Knip не разбирает.
+     * `openai` и `@anthropic-ai/sdk` — только типы для `npm run typecheck`.
+     */
+    "@fastify/cors",
+    "@fastify/rate-limit",
+    "@huggingface/tokenizers",
+    "dotenv",
+    "fastify-plugin",
+    "json5",
+    "jsonrepair",
+    "latex-to-unicode",
+    "lru-cache",
+    "uuid",
+    "openai",
+    "@anthropic-ai/sdk",
+    /**
+     * Старый путь: prepare.cjs патчит бандл пакета по пути в node_modules, а не импортом.
+     */
+    "@caeliq/claude-code-router",
+    /**
+     * Зовётся из .husky/pre-commit через `npx`.
+     */
+    "lint-staged",
+    /**
+     * Виртуальные модули: их отдаёт плагин scripts/build.cjs из файлов пакета tiktoken, пакета нет.
+     */
+    "tiktoken-bindings",
+    "tiktoken-wasm",
+  ],
+  "ignoreBinaries": [
+    /**
+     * Бинарные инструменты проверок ставит mise по .mise.toml, а не npm.
+     */
+    "mise",
+  ],
+}
