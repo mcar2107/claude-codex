@@ -1,0 +1,12 @@
+Project license not yet selected.
+
+The original claude-codex wrapper is UNLICENSED and this package is marked
+private. No open-source license for that original code is granted by this
+file. Select an appropriate project license before public distribution.
+
+Third-party components retain their own licenses and permissions. In particular,
+Claude Code Router source is MIT-licensed; its complete notice is included in
+vendor/ccr/LICENSE. Bundled dependency license texts are included in
+THIRD_PARTY_LICENSES.txt, with additional retained notices in
+dist/cli.cjs.LEGAL.txt. This file does not restrict rights granted by those
+third-party licenses.

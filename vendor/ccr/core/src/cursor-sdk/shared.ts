@@ -1,0 +1,216 @@
+import { createHash } from "crypto";
+import {
+  isCursorInvalidRegistryModelError,
+  type CursorReasoning,
+} from "./model-selection";
+import {
+  isReasoningActive,
+  isReasoningDisabled,
+  normalizeReasoningEffort,
+} from "@/utils/reasoning-effort";
+import { homedir } from "os";
+import { basename, dirname, join } from "path";
+import type { UnifiedMessage } from "@/types/llm";
+
+export const CURSOR_SDK_TRANSFORMER_NAME = "cursor-sdk";
+
+export type CursorSdkMode = "bridge" | "plan" | "agent";
+
+export const DEFAULT_CURSOR_MODE: CursorSdkMode = "bridge";
+
+export const CCR_HOME = join(homedir(), ".claude-code-router");
+export const CURSOR_SDK_WORKSPACES_ROOT = join(
+  CCR_HOME,
+  "cursor-sdk-workspaces"
+);
+
+export const SESSION_IDLE_TTL_MS = 15 * 60 * 1000;
+export const SESSION_LRU_MAX = 32;
+
+/** Orphan scratch workspaces are swept after this long without modification. */
+export const ORPHAN_WORKSPACE_TTL_MS = 24 * 60 * 60 * 1000;
+/** How often the sweep may run, regardless of eviction tick frequency. */
+export const WORKSPACE_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
+
+/** Directory name shape produced by `buildSessionKey` (32 hex chars). */
+const SESSION_KEY_DIR = /^[0-9a-f]{32}$/;
+
+/**
+ * True only for a directory this module created for a session.
+ *
+ * Guards every removal: `cursorMode: "agent"` can point the session at a user
+ * supplied `cursorCwd`, which must never be swept.
+ */
+export function isManagedWorkspacePath(
+  dir: string,
+  root: string = CURSOR_SDK_WORKSPACES_ROOT
+): boolean {
+  const normalized = dir.replace(/[\\/]+$/, "");
+  const parent = dirname(normalized);
+  if (parent !== root.replace(/[\\/]+$/, "")) return false;
+  return SESSION_KEY_DIR.test(basename(normalized));
+}
+
+/** Cursor built-ins we try to deny so Claude Code remains the tool host. */
+export const CURSOR_BUILTIN_DENY_LIST = [
+  "Shell",
+  "Read",
+  "Write",
+  "Delete",
+  "Grep",
+  "Glob",
+  "Edit",
+  "ApplyPatch",
+  "Task",
+  "SemanticSearch",
+  "SemSearch",
+  "ReadLints",
+  "LS",
+  "CreatePlan",
+  "UpdateTodos",
+  "Await",
+  "WebFetch",
+  "WebSearch",
+  "GenerateImage",
+] as const;
+
+export const CUSTOM_USER_TOOLS_SERVER = "custom-user-tools";
+
+export function ensureCcrHomePaths(): string[] {
+  return [CCR_HOME, CURSOR_SDK_WORKSPACES_ROOT];
+}
+
+/** Flatten Unified message content (string or content parts) into plain text. */
+export function contentToText(content: UnifiedMessage["content"]): string {
+  if (content == null) return "";
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return String(content);
+  return content
+    .map((part) => {
+      if (typeof part === "string") return part;
+      if (part && typeof part === "object" && "text" in part) {
+        return String((part as any).text || "");
+      }
+      return "";
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+export function hashSessionFingerprint(parts: string[]): string {
+  return createHash("sha256")
+    .update(parts.filter(Boolean).join("\n"))
+    .digest("hex")
+    .slice(0, 32);
+}
+
+export function coerceThinkingText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value == null) return "";
+  if (typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    if (typeof obj.text === "string") return obj.text;
+    if (typeof obj.content === "string") return obj.content;
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
+  return String(value);
+}
+
+function extractEffort(request: any): string | undefined {
+  return (
+    request?.output_config?.effort ||
+    request?.reasoning?.effort ||
+    request?.effort ||
+    undefined
+  );
+}
+
+/**
+ * The reasoning a Unified request asks Cursor for. Every inbound protocol
+ * maps its own field (`thinking` / `output_config.effort`,
+ * `reasoning_effort`, `reasoning`) onto Unified `reasoning` and `thinking`.
+ * No signal, effort `none`, or disabled thinking means no reasoning.
+ */
+export function extractCursorReasoning(request: any): CursorReasoning {
+  if (isReasoningDisabled(request?.reasoning, request?.thinking)) {
+    return undefined;
+  }
+  const effort = normalizeReasoningEffort(extractEffort(request));
+  if (effort === "none") return undefined;
+  if (effort) return { effort };
+  const thinking = request?.thinking?.type;
+  if (
+    isReasoningActive(request?.reasoning, request?.thinking) ||
+    thinking === "enabled" ||
+    thinking === "adaptive"
+  ) {
+    return {};
+  }
+  return undefined;
+}
+
+/** Stable label for a reasoning request, for compatibility stamps. */
+export function cursorReasoningKey(reasoning: CursorReasoning): string {
+  if (!reasoning) return "off";
+  return reasoning.effort ? `on:${reasoning.effort}` : "on";
+}
+
+const TRANSIENT_CURSOR_STATUS = new Set([429, 502, 503, 504]);
+
+const TRANSIENT_CURSOR_CODE_FRAGMENTS = [
+  "resourceexhausted",
+  "ratelimit",
+  "rateexceed",
+  "quotaexceed",
+  "overloaded",
+  "unavailable",
+  "tryagain",
+  "retryable",
+  "temporarilyunavailable",
+  "capacity",
+];
+
+/**
+ * Transient Cursor provider failures (throttling / overload) must not destroy
+ * the warm sticky agent: the retry reuses it instead of paying a cold start.
+ * Auth errors and client aborts are NOT transient — they keep the old
+ * retire-the-session behavior at the call site.
+ */
+export function isCursorTransientProviderError(err: unknown): boolean {
+  const e = (err || {}) as {
+    name?: unknown;
+    code?: unknown;
+    message?: unknown;
+    statusCode?: unknown;
+    status?: unknown;
+  };
+  const name = typeof e.name === "string" ? e.name : "";
+  if (name === "AbortError") return false;
+  if (isCursorInvalidRegistryModelError(err)) return false;
+  const messageEarly = (
+    typeof e.message === "string" ? e.message : String(err ?? "")
+  ).toLowerCase();
+  if (messageEarly.includes("ai model not found")) return false;
+  const status =
+    typeof e.statusCode === "number"
+      ? e.statusCode
+      : typeof e.status === "number"
+        ? e.status
+        : undefined;
+  if (status !== undefined && TRANSIENT_CURSOR_STATUS.has(status)) return true;
+  const code =
+    typeof e.code === "string"
+      ? e.code.toLowerCase().replace(/[^a-z0-9]/g, "")
+      : "";
+  const message = (
+    typeof e.message === "string" ? e.message : String(err ?? "")
+  ).toLowerCase();
+  const haystack = `${code} ${message}`;
+  return TRANSIENT_CURSOR_CODE_FRAGMENTS.some((fragment) =>
+    haystack.includes(fragment)
+  );
+}

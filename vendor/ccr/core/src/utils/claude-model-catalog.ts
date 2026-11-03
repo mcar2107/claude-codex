@@ -1,0 +1,436 @@
+/**
+ * Claude Code's bundled model capability catalog, revalidated against the
+ * installed v2.1.280 CLI decompilation, plus later API models Anthropic shipped
+ * after that snapshot (e.g. claude-sonnet-5-5) taken from Anthropic's model docs.
+ *
+ * Every model-dependent decision in the claude-auth impersonation path (beta
+ * flags, effort support, thinking shape, max_tokens ceiling) is driven by
+ * `capabilities` membership here, never by matching on the model name.
+ */
+export interface ClaudeModelCatalogEntry {
+  /** Context window in tokens, or undefined when the model predates 1M-context routing. */
+  window?: number;
+  /** Router carries a native (unconditional) 1M-token context window. */
+  nativeOneMillion: boolean;
+  /** Model can opt into a 1M-token window via the context-1m-2025-08-07 beta. */
+  supportsOneMillionBeta: boolean;
+  /** Model id accepts an explicit "[1m]" wire suffix. */
+  supportsOneMillionSuffix: boolean;
+  maxOutputTokens: { default: number; upper: number };
+  defaultEffort?: string;
+  capabilities: string[];
+  /**
+   * CCR-owned Messages API request constraints. Not part of Claude Code's
+   * catalog (Claude Code simply never sends these shapes); sourced from
+   * Anthropic's per-model API documentation. Each flag names a request shape
+   * the model rejects with HTTP 400, so third-party emulation must normalize
+   * it away before sending.
+   */
+  apiConstraints?: {
+    /** `thinking: {type: "disabled"}` is rejected; thinking is always on. */
+    thinkingAlwaysOn?: boolean;
+    /** Forced `tool_choice` (`any` / `tool`) is rejected. */
+    noForcedToolChoice?: boolean;
+    /** `temperature` / `top_p` / `top_k` are rejected. */
+    noSamplingParams?: boolean;
+  };
+}
+
+export const CLAUDE_MODEL_CATALOG: Record<string, ClaudeModelCatalogEntry> = {
+  "claude-3-5-haiku": {
+    nativeOneMillion: false,
+    supportsOneMillionBeta: false,
+    supportsOneMillionSuffix: false,
+    maxOutputTokens: { default: 8192, upper: 8192 },
+    capabilities: [],
+  },
+  "claude-haiku-4-5": {
+    window: 200000,
+    nativeOneMillion: false,
+    supportsOneMillionBeta: false,
+    supportsOneMillionSuffix: true,
+    maxOutputTokens: { default: 32000, upper: 64000 },
+    capabilities: ["context_management"],
+  },
+  // Anthropic docs 2026-10-07 (platform.claude.com/docs/en/models/haiku-5-5).
+  "claude-haiku-5-5": {
+    window: 1e6,
+    nativeOneMillion: true,
+    supportsOneMillionBeta: true,
+    supportsOneMillionSuffix: false,
+    maxOutputTokens: { default: 64000, upper: 128000 },
+    defaultEffort: "medium",
+    capabilities: [
+      "effort",
+      "max_effort",
+      "xhigh_effort",
+      "adaptive_thinking",
+      "mid_conv_system",
+      "mid_conv_tool_change",
+      "context_management",
+    ],
+    // Adaptive-by-default (not always-on). Non-default temperature/top_p/top_k → 400.
+    apiConstraints: { noSamplingParams: true },
+  },
+  "claude-3-5-sonnet": {
+    nativeOneMillion: false,
+    supportsOneMillionBeta: false,
+    supportsOneMillionSuffix: false,
+    maxOutputTokens: { default: 8192, upper: 8192 },
+    capabilities: [],
+  },
+  "claude-3-7-sonnet": {
+    nativeOneMillion: false,
+    supportsOneMillionBeta: false,
+    supportsOneMillionSuffix: false,
+    maxOutputTokens: { default: 32000, upper: 64000 },
+    capabilities: [],
+  },
+  "claude-sonnet-4-0": {
+    window: 200000,
+    nativeOneMillion: false,
+    supportsOneMillionBeta: true,
+    supportsOneMillionSuffix: true,
+    maxOutputTokens: { default: 32000, upper: 64000 },
+    capabilities: ["context_management"],
+  },
+  // Provider / alias spelling of claude-sonnet-4-0 (normalize does not map 4 → 4-0).
+  "claude-sonnet-4": {
+    window: 200000,
+    nativeOneMillion: false,
+    supportsOneMillionBeta: true,
+    supportsOneMillionSuffix: true,
+    maxOutputTokens: { default: 32000, upper: 64000 },
+    capabilities: ["context_management"],
+  },
+  "claude-sonnet-4-5": {
+    window: 200000,
+    nativeOneMillion: false,
+    supportsOneMillionBeta: true,
+    supportsOneMillionSuffix: true,
+    maxOutputTokens: { default: 32000, upper: 64000 },
+    capabilities: ["context_management"],
+  },
+  "claude-sonnet-4-6": {
+    window: 200000,
+    nativeOneMillion: false,
+    supportsOneMillionBeta: true,
+    supportsOneMillionSuffix: true,
+    maxOutputTokens: { default: 32000, upper: 128000 },
+    capabilities: ["effort", "max_effort", "adaptive_thinking", "context_management"],
+  },
+  "claude-sonnet-5": {
+    window: 1e6,
+    nativeOneMillion: true,
+    supportsOneMillionBeta: true,
+    supportsOneMillionSuffix: false,
+    maxOutputTokens: { default: 64000, upper: 128000 },
+    defaultEffort: "high",
+    capabilities: [
+      "effort",
+      "max_effort",
+      "xhigh_effort",
+      "adaptive_thinking",
+      "mid_conv_system",
+      "context_management",
+    ],
+    apiConstraints: { noSamplingParams: true },
+  },
+  // Anthropic docs 2026-09-28 (platform.claude.com/docs/en/models/sonnet-5-5).
+  // Not in the Claude Code v2.1.280 catalog this file was last revalidated against.
+  "claude-sonnet-5-5": {
+    window: 1e6,
+    nativeOneMillion: true,
+    supportsOneMillionBeta: true,
+    supportsOneMillionSuffix: false,
+    maxOutputTokens: { default: 64000, upper: 128000 },
+    defaultEffort: "high",
+    capabilities: [
+      "effort",
+      "max_effort",
+      "xhigh_effort",
+      "adaptive_thinking",
+      "mid_conv_system",
+      "mid_conv_tool_change",
+      "context_management",
+    ],
+    apiConstraints: {
+      // Forced tool_choice any/tool → 400; temperature/top_p/top_k → 400.
+      // Thinking is adaptive-by-default, not always-on — between_tools turns
+      // off up-front thinking at high effort or below.
+      noForcedToolChoice: true,
+      noSamplingParams: true,
+    },
+  },
+  "claude-opus-4-0": {
+    window: 200000,
+    nativeOneMillion: false,
+    supportsOneMillionBeta: false,
+    supportsOneMillionSuffix: true,
+    maxOutputTokens: { default: 32000, upper: 32000 },
+    capabilities: ["context_management"],
+  },
+  "claude-opus-4-1": {
+    window: 200000,
+    nativeOneMillion: false,
+    supportsOneMillionBeta: false,
+    supportsOneMillionSuffix: true,
+    maxOutputTokens: { default: 32000, upper: 32000 },
+    capabilities: ["context_management"],
+  },
+  "claude-opus-4-5": {
+    window: 200000,
+    nativeOneMillion: false,
+    supportsOneMillionBeta: false,
+    supportsOneMillionSuffix: true,
+    maxOutputTokens: { default: 32000, upper: 64000 },
+    capabilities: ["context_management"],
+  },
+  "claude-opus-4-6": {
+    window: 200000,
+    nativeOneMillion: false,
+    supportsOneMillionBeta: true,
+    supportsOneMillionSuffix: true,
+    maxOutputTokens: { default: 64000, upper: 128000 },
+    capabilities: ["effort", "max_effort", "adaptive_thinking", "context_management"],
+  },
+  // Antigravity / Cursor listing of the thinking-capable Opus 4.6 surface.
+  "claude-opus-4-6-thinking": {
+    window: 200000,
+    nativeOneMillion: false,
+    supportsOneMillionBeta: true,
+    supportsOneMillionSuffix: true,
+    maxOutputTokens: { default: 64000, upper: 128000 },
+    capabilities: ["effort", "max_effort", "adaptive_thinking", "context_management"],
+  },
+  "claude-opus-4-7": {
+    window: 1e6,
+    nativeOneMillion: true,
+    supportsOneMillionBeta: true,
+    supportsOneMillionSuffix: true,
+    maxOutputTokens: { default: 64000, upper: 128000 },
+    defaultEffort: "xhigh",
+    capabilities: ["effort", "max_effort", "xhigh_effort", "adaptive_thinking", "context_management"],
+    apiConstraints: { noSamplingParams: true },
+  },
+  "claude-opus-4-8": {
+    window: 1e6,
+    nativeOneMillion: true,
+    supportsOneMillionBeta: true,
+    supportsOneMillionSuffix: true,
+    maxOutputTokens: { default: 64000, upper: 128000 },
+    defaultEffort: "high",
+    capabilities: [
+      "effort",
+      "max_effort",
+      "xhigh_effort",
+      "adaptive_thinking",
+      "mid_conv_system",
+      "mid_conv_tool_change",
+      "context_management",
+      "fast_mode",
+      "lean_prompt",
+    ],
+    apiConstraints: { noSamplingParams: true },
+  },
+  "claude-opus-5": {
+    window: 1e6,
+    nativeOneMillion: true,
+    supportsOneMillionBeta: true,
+    supportsOneMillionSuffix: true,
+    maxOutputTokens: { default: 64000, upper: 128000 },
+    defaultEffort: "high",
+    capabilities: [
+      "effort",
+      "max_effort",
+      "xhigh_effort",
+      "adaptive_thinking",
+      "mid_conv_system",
+      "mid_conv_tool_change",
+      "context_management",
+      "thinking_disabled_effort_cap",
+      "fast_mode",
+      "lean_prompt",
+      "refusal_fallback",
+      "opus_5_prompt_bundle",
+    ],
+    apiConstraints: { noSamplingParams: true },
+  },
+  "claude-opus-5-5": {
+    window: 1e6,
+    nativeOneMillion: true,
+    supportsOneMillionBeta: true,
+    supportsOneMillionSuffix: true,
+    maxOutputTokens: { default: 128000, upper: 128000 },
+    defaultEffort: "medium",
+    capabilities: [
+      "effort",
+      "max_effort",
+      "xhigh_effort",
+      "adaptive_thinking",
+      "rejects_disabled_thinking",
+      "mid_conv_system",
+      "mid_conv_tool_change",
+      "per_turn_effort",
+      "per_turn_timing",
+      "context_management",
+      "fast_mode",
+      "lean_prompt",
+      "refusal_fallback",
+      "opus_5_5_prompt_bundle",
+    ],
+    apiConstraints: {
+      thinkingAlwaysOn: true,
+      noForcedToolChoice: true,
+      noSamplingParams: true,
+    },
+  },
+  "claude-fable-5-1": {
+    window: 1e6,
+    nativeOneMillion: true,
+    supportsOneMillionBeta: true,
+    supportsOneMillionSuffix: false,
+    maxOutputTokens: { default: 64000, upper: 128000 },
+    defaultEffort: "high",
+    capabilities: [
+      "effort",
+      "max_effort",
+      "xhigh_effort",
+      "adaptive_thinking",
+      "rejects_disabled_thinking",
+      "mid_conv_system",
+      "mid_conv_tool_change",
+      "per_turn_effort",
+      "per_turn_timing",
+      "context_management",
+      "lean_prompt",
+      "fable_5_mitigations",
+      "refusal_fallback",
+      "fable_5_1_prompt_bundle",
+    ],
+    apiConstraints: {
+      thinkingAlwaysOn: true,
+      noForcedToolChoice: true,
+      noSamplingParams: true,
+    },
+  },
+  "claude-fable-5": {
+    window: 1e6,
+    nativeOneMillion: true,
+    supportsOneMillionBeta: true,
+    supportsOneMillionSuffix: false,
+    maxOutputTokens: { default: 64000, upper: 128000 },
+    defaultEffort: "high",
+    capabilities: [
+      "effort",
+      "max_effort",
+      "xhigh_effort",
+      "adaptive_thinking",
+      "rejects_disabled_thinking",
+      "mid_conv_system",
+      "mid_conv_tool_change",
+      "context_management",
+      "lean_prompt",
+      "fable_5_mitigations",
+      "refusal_fallback",
+    ],
+    apiConstraints: { thinkingAlwaysOn: true, noSamplingParams: true },
+  },
+  "claude-mythos-5": {
+    window: 1e6,
+    nativeOneMillion: true,
+    supportsOneMillionBeta: true,
+    supportsOneMillionSuffix: false,
+    maxOutputTokens: { default: 64000, upper: 128000 },
+    capabilities: [],
+  },
+  "claude-mythos-5-1": {
+    window: 1e6,
+    nativeOneMillion: true,
+    supportsOneMillionBeta: true,
+    supportsOneMillionSuffix: false,
+    maxOutputTokens: { default: 64000, upper: 128000 },
+    defaultEffort: "high",
+    capabilities: [
+      "effort",
+      "max_effort",
+      "xhigh_effort",
+      "adaptive_thinking",
+      "rejects_disabled_thinking",
+      "mid_conv_system",
+      "mid_conv_tool_change",
+      "per_turn_timing",
+      "context_management",
+      "lean_prompt",
+      "fable_5_mitigations",
+      "fable_5_1_prompt_bundle",
+    ],
+    apiConstraints: {
+      thinkingAlwaysOn: true,
+      noForcedToolChoice: true,
+      noSamplingParams: true,
+    },
+  },
+};
+
+/** The literal wire marker CCR/Claude Code use to request a model's 1M-token context window. */
+const ONE_MILLION_CONTEXT_MARKER = /\[1m\]$/i;
+
+/** Strip the "[1m]" wire marker, reporting whether it was present. */
+export function stripOneMillionContextMarker(modelId: string | undefined): {
+  modelId: string;
+  requestedOneMillion: boolean;
+} {
+  const raw = modelId || "";
+  const requestedOneMillion = ONE_MILLION_CONTEXT_MARKER.test(raw);
+  return { modelId: raw.replace(ONE_MILLION_CONTEXT_MARKER, ""), requestedOneMillion };
+}
+
+/**
+ * Normalize a routed model id (CCR "provider,model" selector, an optional
+ * "[1m]" marker, and Anthropic's dated model-id suffix) down to a catalog
+ * key, e.g. "anthropic,claude-opus-5-20260101[1m]" -> "claude-opus-5".
+ */
+export function normalizeModelIdForCatalog(modelId: string | undefined): string {
+  if (!modelId) return "";
+  let id = modelId.trim();
+  const commaIndex = id.indexOf(",");
+  if (commaIndex >= 0) id = id.slice(commaIndex + 1);
+  id = stripOneMillionContextMarker(id).modelId.trim();
+  // Anthropic model ids carry a dated or "@YYYYMMDD" revision suffix that is
+  // not part of the catalog's family key.
+  id = id.replace(/[-@]\d{8}$/, "");
+  return id.toLowerCase();
+}
+
+/** Look up a model's catalog entry. Unknown models resolve to undefined (minimal capability set). */
+export function lookupClaudeModelCatalogEntry(
+  modelId: string | undefined
+): ClaudeModelCatalogEntry | undefined {
+  const key = normalizeModelIdForCatalog(modelId);
+  if (!key) return undefined;
+  return CLAUDE_MODEL_CATALOG[key];
+}
+
+export function catalogEntryHasCapability(
+  entry: ClaudeModelCatalogEntry | undefined,
+  capability: string
+): boolean {
+  return entry?.capabilities.includes(capability) ?? false;
+}
+
+/**
+ * Whether extended-thinking betas apply to this model. The catalog has no
+ * dedicated "supports_thinking" column, but every entry that predates the
+ * Claude 4 thinking generation (claude-3-5-haiku, claude-3-5-sonnet,
+ * claude-3-7-sonnet) — plus the not-yet-classified claude-mythos-5 — carries
+ * an empty capability set; every thinking-capable model carries at least
+ * "context_management". A non-empty capability set is therefore a reliable,
+ * self-documenting proxy that also degrades unknown models to "no thinking"
+ * rather than guessing.
+ */
+export function catalogEntrySupportsThinking(
+  entry: ClaudeModelCatalogEntry | undefined
+): boolean {
+  return (entry?.capabilities.length ?? 0) > 0;
+}

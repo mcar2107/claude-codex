@@ -1,0 +1,1530 @@
+import {
+  Cursor,
+  type ModelListItem,
+  type ModelSelection,
+  type SDKMessage,
+} from "@cursor/sdk";
+import { createHash } from "crypto";
+import type { UnifiedChatRequest, UnifiedMessage } from "@/types/llm";
+import type { UnifiedTurnIntent } from "@/types/turn-intent";
+import { resolveCursorApiKey } from "@/utils/cursor-auth";
+import {
+  installCursorAuthExchangeCache,
+  invalidateCursorAuthExchange,
+} from "./auth-exchange-cache";
+import { ensureCursorSdkRuntimeDefaults } from "./runtime-defaults";
+import { ensureRequestLatency, markLatency } from "@/utils/request-latency";
+import { accumulateChatCompletion, createSseHelpers } from "./events-to-sse";
+import {
+  analyzeTrailingCursorToolTurn,
+  bridgePromptGuidanceFingerprint,
+  progressOnlyContinuationPrompt,
+  shouldContinueProgressOnlyTurn,
+  toSdkPrompt,
+  type TrailingCursorToolTurn,
+} from "./prompt";
+import { extractHostEnvironment } from "./host-env";
+import { resolveInternalCursorSession } from "./inbound-session";
+import {
+  buildSessionKey,
+  cancelActiveRun,
+  globalSessionManager,
+  isSessionInFlight,
+  markSessionPoisoned,
+  refreshWorkspaceGuidance,
+  resolveHostToolId,
+  shouldEnableCursorSandbox,
+  touchSession,
+  withSessionSendLock,
+  type CursorSdkSession,
+} from "./session";
+import {
+  isCursorAgentBusyError,
+  isCursorSendPoisonError,
+  sendCursorPrompt,
+} from "./send";
+import {
+  DEFAULT_CURSOR_MODE,
+  contentToText,
+  coerceThinkingText,
+  cursorReasoningKey,
+  extractCursorReasoning,
+  hashSessionFingerprint,
+  isCursorTransientProviderError,
+  type CursorSdkMode,
+} from "./shared";
+import { createTurnToolMetrics, toCustomTools } from "./tools";
+import {
+  cursorModelSelectionsEqual,
+  isCursorInvalidRegistryModelError,
+  selectCursorModelSelection,
+  type CursorReasoning,
+} from "./model-selection";
+import { isStatuslinePollTurn } from "@/utils/nested-agent";
+import {
+  buildAccurateUsageFromSdk,
+  estimateRequestPromptTokens,
+  usageFromSdk,
+  type OpenAiUsage,
+} from "./usage";
+import {
+  createCursorCompatibilityStamp,
+  createCursorTranscriptCommit,
+  fingerprintCursorTurn,
+  getStrictCursorTranscriptSuffix,
+} from "./turn-identity";
+import {
+  CURSOR_SOFT_CANCEL_THEN_INCREMENTAL,
+  planCursorLifecycle,
+} from "./lifecycle-planner";
+import {
+  COMPLETED_TURN_TTL_MS,
+  globalCursorTurnRegistry,
+  type CursorTurnLease,
+} from "./turn-output";
+
+export interface CursorSdkRunnerOptions {
+  cursorMode?: CursorSdkMode;
+  cursorCwd?: string;
+  /** Opt-in only; ignored/forced off in Docker. Default false. */
+  sandboxEnabled?: boolean;
+  abortSignal?: AbortSignal;
+  logger?: any;
+  /** Request-local protocol semantics; never serialized into the provider body. */
+  turnIntent?: UnifiedTurnIntent;
+  /** Stable source conversation identity recovered by the protocol adapter. */
+  sourceSessionIdentity?: string;
+}
+
+/** Process-local only — model IDs themselves live in Providers[].models via `ccr model get`. */
+const MODEL_CATALOG_TTL_MS = 15 * 60 * 1000;
+
+type InMemoryModelCatalog = {
+  fetchedAt: number;
+  apiKeyFingerprint: string;
+  models: ModelListItem[];
+};
+
+let modelCatalog: InMemoryModelCatalog | null = null;
+
+function apiKeyFingerprint(apiKey: string): string {
+  return hashSessionFingerprint([apiKey]);
+}
+
+/** Cursor agent auth often arrives as run status ERROR / AuthenticationError, not HTTP 401. */
+function isCursorAuthenticationError(err: unknown): boolean {
+  const e = (err || {}) as {
+    name?: unknown;
+    code?: unknown;
+    message?: unknown;
+  };
+  const name = typeof e.name === "string" ? e.name : "";
+  const code = typeof e.code === "string" ? e.code : "";
+  const message = (
+    typeof e.message === "string" ? e.message : String(err ?? "")
+  ).toLowerCase();
+  return (
+    name === "AuthenticationError" ||
+    code === "unauthenticated" ||
+    message.includes("authentication error") ||
+    message.includes("try logging out and back in")
+  );
+}
+
+function dropCachedExchangeOnAuthError(apiKey: string, err: unknown): void {
+  if (isCursorAuthenticationError(err)) {
+    invalidateCursorAuthExchange(apiKey);
+  }
+}
+
+async function getModelCatalog(apiKey: string): Promise<ModelListItem[]> {
+  ensureCursorSdkRuntimeDefaults();
+  installCursorAuthExchangeCache();
+  const fingerprint = apiKeyFingerprint(apiKey);
+  if (
+    modelCatalog &&
+    modelCatalog.apiKeyFingerprint === fingerprint &&
+    Date.now() - modelCatalog.fetchedAt < MODEL_CATALOG_TTL_MS
+  ) {
+    return modelCatalog.models;
+  }
+
+  let models: ModelListItem[];
+  try {
+    models = (await Cursor.models.list({ apiKey })) || [];
+  } catch (err) {
+    // A failed refresh keeps serving the last catalog for this key. A
+    // missing catalog yields bare ids that differ from every bound
+    // parameterized selection, which would remint live sessions.
+    if (modelCatalog && modelCatalog.apiKeyFingerprint === fingerprint) {
+      return modelCatalog.models;
+    }
+    throw err;
+  }
+  modelCatalog = {
+    fetchedAt: Date.now(),
+    apiKeyFingerprint: fingerprint,
+    models,
+  };
+  return models;
+}
+
+/**
+ * Map a configured CCR model id and the request's reasoning onto SDK ModelSelection.
+ * Catalog fetch is best-effort for variant params only — never writes a side cache file.
+ * Canonical model ids are discovered with `ccr model get <cursor-provider>`.
+ */
+async function resolveModelSelection(
+  apiKey: string,
+  modelId: string,
+  reasoning: CursorReasoning
+): Promise<{ selection: ModelSelection; catalogued: boolean }> {
+  let models: ModelListItem[];
+  try {
+    models = await getModelCatalog(apiKey);
+  } catch {
+    return { selection: { id: modelId }, catalogued: false };
+  }
+  return {
+    selection: selectCursorModelSelection(models, modelId, reasoning),
+    catalogued: true,
+  };
+}
+
+/**
+ * Whether the agent behind an internal Cursor id is running a turn or
+ * finished one within the completed-turn replay window.
+ */
+function isInternalCursorSessionActive(internalId: string): boolean {
+  const sessionKey = buildSessionKey({ headerSession: internalId });
+  // Admission precedes catalog lookup and Agent.create. An opening retry
+  // must join that producer even before there is an SDK session to inspect.
+  if (globalCursorTurnRegistry.peekActive(sessionKey)) return true;
+  const session = globalSessionManager.peek(sessionKey);
+  if (!session) return false;
+  return (
+    isSessionInFlight(session) ||
+    Date.now() - session.lastActiveAt <= COMPLETED_TURN_TTL_MS
+  );
+}
+
+function statuslineBusyResponse(stream: boolean): Response {
+  const content = "Working";
+  if (!stream) {
+    return new Response(
+      JSON.stringify({
+        id: "chatcmpl-cursor-statusline",
+        object: "chat.completion",
+        created: Math.floor(Date.now() / 1000),
+        model: "cursor",
+        choices: [
+          {
+            index: 0,
+            finish_reason: "stop",
+            message: { role: "assistant", content },
+          },
+        ],
+        usage: { prompt_tokens: 0, completion_tokens: 1, total_tokens: 1 },
+      }),
+      { headers: { "content-type": "application/json" } }
+    );
+  }
+  const chunk = (delta: object, finish: string | null) =>
+    `data: ${JSON.stringify({
+      id: "chatcmpl-cursor-statusline",
+      object: "chat.completion.chunk",
+      created: Math.floor(Date.now() / 1000),
+      model: "cursor",
+      choices: [{ index: 0, delta, finish_reason: finish }],
+    })}\n\n`;
+  const body =
+    chunk({ role: "assistant", content }, null) +
+    chunk({}, "stop") +
+    "data: [DONE]\n\n";
+  return new Response(body, {
+    headers: { "content-type": "text/event-stream" },
+  });
+}
+
+function isSupportedIdleTranscriptSuffix(
+  suffix: readonly UnifiedMessage[]
+): boolean {
+  return suffix.length === 1 && suffix[0]?.role === "user";
+}
+
+function isSupportedParkedTranscriptSuffix(
+  suffix: readonly UnifiedMessage[],
+  trailingTurn: TrailingCursorToolTurn,
+  turnIntent?: UnifiedTurnIntent,
+  resolveId: (id: string) => string = (id) => id
+): boolean {
+  if (trailingTurn.hasTrailingUserInput) return false;
+  const hasSyntheticTrailingUser =
+    turnIntent?.interruption === "synthetic_client_interrupt" &&
+    turnIntent.steering === "none";
+  const expectedLength =
+    trailingTurn.toolResults.length + (hasSyntheticTrailingUser ? 1 : 0);
+  if (suffix.length !== expectedLength) return false;
+
+  for (let index = 0; index < trailingTurn.toolResults.length; index += 1) {
+    const message = suffix[index];
+    const expected = trailingTurn.toolResults[index];
+    if (
+      message?.role !== "tool" ||
+      resolveId(String(message.tool_call_id || "")) !== expected.toolCallId ||
+      contentToText(message.content) !== expected.content
+    ) {
+      return false;
+    }
+  }
+
+  return (
+    !hasSyntheticTrailingUser ||
+    suffix[suffix.length - 1]?.role === "user"
+  );
+}
+
+function throwIfCursorProducerAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  throw Object.assign(
+    new Error("cursor-sdk response producer aborted before lifecycle mutation"),
+    { name: "AbortError" }
+  );
+}
+
+export async function* streamSessionEvents(
+  session: CursorSdkSession,
+  mode: CursorSdkMode,
+  runToken: symbol,
+  abortSignal?: AbortSignal
+): AsyncGenerator<
+  | { kind: "sdk"; message: SDKMessage; source: "stream" | "delta" }
+  | { kind: "host_tool"; tool: { id: string; name: string; args: Record<string, unknown> } }
+  | { kind: "end"; aborted?: boolean }
+> {
+  const iterator = session.streamIterator;
+  if (!iterator) {
+    yield { kind: "end" };
+    return;
+  }
+
+  // A pending next() is rejected by the SDK's internal AbortController when
+  // run.cancel() runs. This generator can return before racing that promise
+  // (abort / run-token change below), so keep a handler attached from creation
+  // instead of relying on a later race or on cancelActiveRun's catch.
+  const trackNext = (next: Promise<IteratorResult<any>>) => {
+    void next.catch(() => undefined);
+    session.streamNext = next;
+    session.streamNextRunToken = runToken;
+    return next;
+  };
+
+  let pendingNext = trackNext(
+    session.streamNextRunToken === runToken && session.streamNext
+      ? session.streamNext
+      : iterator.next()
+  );
+  let emitWait = session.waitForEmit().then(() => "emit" as const);
+  let sdkMessageWait = session.waitForSdkMessage().then(
+    () => "sdk_message" as const
+  );
+
+  const shiftSdkDelta = () => {
+    const idx = session.pendingSdkMessages.findIndex(
+      (entry) => entry.runToken === runToken
+    );
+    if (idx === -1) return undefined;
+    const [entry] = session.pendingSdkMessages.splice(idx, 1);
+    return entry;
+  };
+
+  while (true) {
+    if (abortSignal?.aborted || session.activeRunToken !== runToken) {
+      yield { kind: "end", aborted: abortSignal?.aborted === true };
+      return;
+    }
+
+    const queuedSdkDelta = shiftSdkDelta();
+    if (queuedSdkDelta) {
+      yield {
+        kind: "sdk",
+        message: queuedSdkDelta.message,
+        source: queuedSdkDelta.source,
+      };
+      continue;
+    }
+
+    const raced = await Promise.race([
+      sdkMessageWait.then((v) => ({ type: v })),
+      pendingNext.then((r) => ({ type: "msg" as const, r })),
+      emitWait.then((v) => ({ type: v })),
+    ]);
+
+    if (raced.type === "emit") {
+      while (
+        session.pendingEmit.length &&
+        session.pendingEmit[0]?.runToken === runToken
+      ) {
+        const tool = session.pendingEmit.shift()!;
+        yield { kind: "host_tool", tool };
+      }
+      emitWait = session.waitForEmit().then(() => "emit" as const);
+      continue;
+    }
+
+    if (raced.type === "sdk_message") {
+      while (true) {
+        const entry = shiftSdkDelta();
+        if (!entry) break;
+        yield { kind: "sdk", message: entry.message, source: entry.source };
+      }
+      sdkMessageWait = session.waitForSdkMessage().then(
+        () => "sdk_message" as const
+      );
+      continue;
+    }
+
+    const { r } = raced;
+    if (session.streamNext === pendingNext) {
+      session.streamNext = undefined;
+      session.streamNextRunToken = undefined;
+    }
+    if (r.done) {
+      yield { kind: "end" };
+      return;
+    }
+
+    const message = r.value as SDKMessage;
+    if (abortSignal?.aborted || session.activeRunToken !== runToken) {
+      yield { kind: "end", aborted: abortSignal?.aborted === true };
+      return;
+    }
+    if (message?.type === "tool_call" && mode === "bridge") {
+      session.metrics.builtinToolCallsSeen += 1;
+      // Do not forward Cursor built-ins as Claude Code tools.
+    }
+    yield { kind: "sdk", message, source: "stream" };
+    pendingNext = trackNext(iterator.next());
+  }
+}
+
+function sdkMessageFromDelta(
+  session: CursorSdkSession,
+  update: any
+): SDKMessage | undefined {
+  if (!update || update.type !== "thinking-delta") return undefined;
+  const text = coerceThinkingText(update.text);
+  if (!text) return undefined;
+  return {
+    type: "thinking",
+    agent_id: session.agentId,
+    run_id: session.run?.id || "",
+    text,
+  } as SDKMessage;
+}
+
+/**
+ * Remove an interrupted session from reuse before waiting on SDK cleanup.
+ *
+ * `cancelActiveRun` clears local handles before its awaited iterator/run
+ * cancellation completes. Detaching and poisoning first prevents a reconnect
+ * from observing that temporary handle-free state and sending on the still-busy
+ * SDK agent, while preserving the old handles for the retirement task itself.
+ */
+async function retireCursorSession(
+  session: CursorSdkSession,
+  options: {
+    reason: string;
+    onlyRunToken?: symbol;
+  }
+): Promise<boolean> {
+  if (
+    options.onlyRunToken &&
+    session.activeRunToken !== options.onlyRunToken
+  ) {
+    return false;
+  }
+
+  return globalSessionManager.retireSession(
+    session,
+    options.reason,
+    () =>
+      withSessionSendLock(session, async () => {
+        await cancelActiveRun(session, {
+          rejectParked: true,
+          reason: options.reason,
+          timeoutMs: 2_000,
+          poisonOnFailure: true,
+        });
+        await globalSessionManager.invalidate(session, options.reason);
+        return true;
+      })
+  );
+}
+
+type ResolvedCursorRequest = {
+  apiKey: string;
+  hostEnv: ReturnType<typeof extractHostEnvironment>;
+  mode: CursorSdkMode;
+  modelId: string;
+  sessionKey: string;
+  turnIntent?: UnifiedTurnIntent;
+};
+
+function resolveCursorRequest(
+  request: UnifiedChatRequest,
+  provider: any,
+  context: any,
+  options: CursorSdkRunnerOptions
+): ResolvedCursorRequest {
+  const mode: CursorSdkMode = options.cursorMode || DEFAULT_CURSOR_MODE;
+  const modelId = request.model || "composer-2";
+  let apiKey: string;
+  try {
+    apiKey = resolveCursorApiKey(provider);
+  } catch (err: any) {
+    throw Object.assign(err instanceof Error ? err : new Error(String(err)), {
+      statusCode: err?.statusCode || 401,
+      code: "provider_response_error",
+      type: "api_error",
+    });
+  }
+
+  const protocolContext =
+    context?.protocolContext || context?.req?.protocolContext;
+  const sourceSessionIdentity =
+    options.sourceSessionIdentity ||
+    context?.unifiedRequest?.sourceSessionIdentity ||
+    (request as any)?.metadata?.user_id;
+  // Internal id only. Client `x-ccr-cursor-session` is stripped and ignored.
+  const inbound = resolveInternalCursorSession({
+    protocol:
+      typeof protocolContext?.protocol === "string"
+        ? protocolContext.protocol
+        : undefined,
+    request,
+    context,
+    model: modelId,
+    sourceSessionIdentity:
+      typeof sourceSessionIdentity === "string"
+        ? sourceSessionIdentity
+        : undefined,
+    isActive: isInternalCursorSessionActive,
+  });
+  if (context && typeof context === "object") {
+    context.internalCursorSession = inbound.internalId;
+    context.cursorInboundKey = inbound.inboundKey;
+  }
+  const sessionKey = buildSessionKey({ headerSession: inbound.internalId });
+
+  return {
+    apiKey,
+    hostEnv: extractHostEnvironment(request),
+    mode,
+    modelId,
+    sessionKey,
+    turnIntent:
+      options.turnIntent || context?.unifiedRequest?.turnIntent,
+  };
+}
+
+/**
+ * Coordinate identical host retries before entering the session lifecycle.
+ *
+ * The shared turn owns the one response producer. Every caller receives an
+ * independent bounded replay stream, so no two HTTP responses can consume the
+ * same Cursor iterator.
+ */
+export async function runCursor(
+  request: UnifiedChatRequest,
+  provider: any,
+  context: any,
+  options: CursorSdkRunnerOptions = {}
+): Promise<Response> {
+  const resolved = resolveCursorRequest(request, provider, context, options);
+  const logicalWorkspace =
+    options.cursorCwd || `managed-session:${resolved.sessionKey}`;
+  const admissionCompatibility = createCursorCompatibilityStamp({
+    credentialFingerprint: apiKeyFingerprint(resolved.apiKey),
+    guidanceFingerprint: resolved.hostEnv.fingerprint,
+    mode: resolved.mode,
+    model: {
+      id: resolved.modelId,
+      effort: cursorReasoningKey(extractCursorReasoning(request)),
+    },
+    sandboxEnabled: shouldEnableCursorSandbox(options.sandboxEnabled),
+    tools: request.tools,
+    workspaceDir: logicalWorkspace,
+  });
+  const fingerprint = fingerprintCursorTurn(request, {
+    compatibilityStamp: admissionCompatibility,
+    turnIntent: resolved.turnIntent,
+  });
+  const activeTurn = globalCursorTurnRegistry.peekActive(resolved.sessionKey);
+  if (
+    activeTurn &&
+    activeTurn.fingerprint !== fingerprint &&
+    isStatuslinePollTurn(request)
+  ) {
+    // Claude Code polls statusline on the same session id. That must not
+    // supersede an in-flight Task/tool turn (15-minute 409 poison).
+    return statuslineBusyResponse(request.stream === true);
+  }
+  const lease: CursorTurnLease = await globalCursorTurnRegistry.admit({
+    sessionKey: resolved.sessionKey,
+    fingerprint,
+    responseKind: request.stream === true ? "stream" : "json",
+    signal: options.abortSignal,
+  });
+
+  if (lease.kind !== "leader") {
+    return lease.response();
+  }
+
+  try {
+    const response = await runCursorOnce(
+      request,
+      provider,
+      context,
+      {
+        ...options,
+        // Subscriber aborts are reference-counted by the shared turn. The
+        // producer is aborted only when every subscriber leaves or a different
+        // logical turn supersedes it.
+        abortSignal: lease.producerSignal,
+        turnIntent: resolved.turnIntent,
+      },
+      resolved
+    );
+    await lease.attach(response);
+  } catch (error) {
+    lease.fail(error);
+    throw error;
+  }
+  // A caller can disconnect after the shared producer is attached while an
+  // identical subscriber remains. Its local response failure must not fail the
+  // shared turn for the surviving subscriber.
+  return lease.response();
+}
+
+async function runCursorOnce(
+  request: UnifiedChatRequest,
+  provider: any,
+  context: any,
+  options: CursorSdkRunnerOptions,
+  resolved: ResolvedCursorRequest
+): Promise<Response> {
+  throwIfCursorProducerAborted(options.abortSignal);
+  const logger = options.logger || provider?.logger;
+  if (logger) globalSessionManager.setLogger(logger);
+  const mode = resolved.mode;
+  const wantsStream = request.stream === true;
+  const modelId = resolved.modelId;
+  const apiKey = resolved.apiKey;
+  const sessionKey = resolved.sessionKey;
+
+  // Always attach catalog variant params. A bare `{ id }` is rejected for
+  // parameterized registry models (Grok 4.7: context + reasoning_effort + fast).
+  // No reasoning on the request selects the model's least-reasoning variant.
+  const resolvedModel = await resolveModelSelection(
+    apiKey,
+    modelId,
+    extractCursorReasoning(request)
+  );
+  let model = resolvedModel.selection;
+  throwIfCursorProducerAborted(options.abortSignal);
+
+  // Host facts are re-read every turn: the project root can change between
+  // requests on the same session, and only the host knows where tools land.
+  const hostEnv = resolved.hostEnv;
+
+  const sessionOptions = {
+    key: sessionKey,
+    apiKey,
+    model,
+    mode,
+    cursorCwd: options.cursorCwd,
+    sandboxEnabled: options.sandboxEnabled,
+    hostEnv,
+  };
+
+  throwIfCursorProducerAborted(options.abortSignal);
+  let session = await globalSessionManager.getOrCreate(sessionOptions);
+  const boundModel = session.agent.model;
+  if (boundModel && !cursorModelSelectionsEqual(boundModel, model)) {
+    if (
+      isSessionInFlight(session) ||
+      (!resolvedModel.catalogued && boundModel.id === model.id)
+    ) {
+      // Keep the bound selection for this request. Retiring would cancel a
+      // live run (another request's stream, or parked host tools this
+      // request may resolve), and an uncatalogued bare id is no evidence
+      // that the selection changed. A new choice applies to the next agent.
+      logger?.debug?.(
+        {
+          sessionKey: session.key,
+          agentId: session.agentId,
+          boundModel,
+          requestedModel: model,
+          catalogued: resolvedModel.catalogued,
+        },
+        "cursor-sdk keeping bound model selection"
+      );
+      model = boundModel;
+      sessionOptions.model = boundModel;
+    } else {
+      // Sticky resume after a catalog-param change (Grok 4.7 variants)
+      // cannot rewrite the bound registry model on send — Cursor 502s.
+      // Remint.
+      await retireCursorSession(session, {
+        reason: "cursor-sdk model selection changed",
+      });
+      throwIfCursorProducerAborted(options.abortSignal);
+      session = await globalSessionManager.getOrCreate(sessionOptions);
+    }
+  }
+  throwIfCursorProducerAborted(options.abortSignal);
+  const hostEnvForSession = (targetSession: CursorSdkSession) =>
+    !hostEnv.known && targetSession.hostEnv?.known
+      ? targetSession.hostEnv
+      : hostEnv;
+  const compatibilityForSession = (targetSession: CursorSdkSession) =>
+    createCursorCompatibilityStamp({
+      credentialFingerprint: apiKeyFingerprint(apiKey),
+      guidanceFingerprint: hostEnvForSession(targetSession).fingerprint,
+      mode,
+      model,
+      sandboxEnabled: shouldEnableCursorSandbox(options.sandboxEnabled),
+      tools: request.tools,
+      workspaceDir: targetSession.workspaceDir,
+    });
+
+  let promptHostEnv = hostEnvForSession(session);
+  let compatibilityStamp = compatibilityForSession(session);
+  const trailingTurn = analyzeTrailingCursorToolTurn(
+    request,
+    options.turnIntent
+  );
+  // Host echoes carry emission aliases; translate back to the parked SDK
+  // originals so lifecycle matching and parked resolution compare one id
+  // space. Unknown ids pass through and mismatch exactly as before.
+  const resolvedTrailingTurn: TrailingCursorToolTurn = {
+    ...trailingTurn,
+    toolResults: trailingTurn.toolResults.map((result) => ({
+      ...result,
+      toolCallId: resolveHostToolId(session, result.toolCallId),
+    })),
+  };
+  const toolResults = resolvedTrailingTurn.toolResults;
+
+  const runSnapshot =
+    session.parked.length > 0
+      ? {
+          kind: "parked" as const,
+          live: Boolean(
+            session.run &&
+              session.streamIterator &&
+              session.activeRunToken &&
+              !session.poisoned
+          ),
+          tools: session.parked,
+        }
+      : session.run ||
+          session.streamIterator ||
+          session.streamNext ||
+          session.activeRunToken
+        ? { kind: "active-different-turn" as const }
+        : { kind: "idle" as const };
+  const strictSuffix =
+    session.transcriptCommit &&
+    session.compatibilityStamp === compatibilityStamp
+      ? getStrictCursorTranscriptSuffix(session.transcriptCommit, request)
+      : undefined;
+  const supportedSuffix =
+    strictSuffix === undefined
+      ? false
+      : runSnapshot.kind === "parked"
+        ? isSupportedParkedTranscriptSuffix(
+            strictSuffix,
+            resolvedTrailingTurn,
+            options.turnIntent,
+            (id) => resolveHostToolId(session, id)
+          )
+        : runSnapshot.kind === "idle"
+          ? isSupportedIdleTranscriptSuffix(strictSuffix)
+          : true;
+  const alignment =
+    !session.hasSentPrompt || !session.transcriptCommit
+      ? "unknown"
+      : supportedSuffix
+        ? "strict"
+        : "divergent";
+  let lifecyclePlan = planCursorLifecycle({
+    session: {
+      alignment,
+      hasSentPrompt: session.hasSentPrompt,
+      poisoned: session.poisoned === true,
+      compatibilityMatch:
+        session.compatibilityStamp === compatibilityStamp,
+      run: runSnapshot,
+    },
+    turn: {
+      hasMeaningfulSteering: trailingTurn.hasTrailingUserInput,
+      toolResults,
+    },
+  });
+
+  // Capture the pre-execution action for cache-outcome prediction. After a hard
+  // remint, lifecyclePlan becomes send-full; soft paths stay send-incremental.
+  const lifecycleForCache = {
+    sessionKey: session.key,
+    action: lifecyclePlan.action,
+    reason: "reason" in lifecyclePlan ? lifecyclePlan.reason : undefined,
+  };
+
+  if (lifecyclePlan.action === "retire-and-replay-full") {
+    // Hard remint only (poisoned-session). Soft alignment never reaches here.
+    logger?.info?.(
+      {
+        sessionKey: session.key,
+        agentId: session.agentId,
+        alignment,
+        lifecycleReason: lifecyclePlan.reason,
+        toolResultCount: toolResults.length,
+      },
+      "cursor-sdk retiring session before full transcript replay"
+    );
+    await retireCursorSession(session, {
+      reason: `cursor-sdk lifecycle: ${lifecyclePlan.reason}`,
+      onlyRunToken: session.activeRunToken,
+    });
+    throwIfCursorProducerAborted(options.abortSignal);
+    session = await globalSessionManager.getOrCreate(sessionOptions);
+    throwIfCursorProducerAborted(options.abortSignal);
+    promptHostEnv = hostEnvForSession(session);
+    compatibilityStamp = compatibilityForSession(session);
+    lifecyclePlan = {
+      action: "send-full",
+      reason: "unused-session",
+    };
+  } else if (
+    (lifecyclePlan.action === "send-incremental" ||
+      lifecyclePlan.action === "send-full") &&
+    (session.run ||
+      session.streamIterator ||
+      session.streamNext ||
+      session.activeRunToken ||
+      session.parked.length > 0)
+  ) {
+    // Soft sticky path (or first send after inconsistent unused): clear prior
+    // run/parked without reminting. Reason alone is not enough — unknown/
+    // divergent alignment can still leave a live parked/active run that would
+    // fail admission and force a hard remint.
+    const softReason =
+      "reason" in lifecyclePlan ? lifecyclePlan.reason : "soft-cancel";
+    logger?.info?.(
+      {
+        sessionKey: session.key,
+        agentId: session.agentId,
+        alignment,
+        lifecycleReason: softReason,
+        softCancelHint: CURSOR_SOFT_CANCEL_THEN_INCREMENTAL.has(
+          softReason as any
+        ),
+        toolResultCount: toolResults.length,
+        runKind: runSnapshot.kind,
+        parkedCount: session.parked.length,
+        hasSteering: trailingTurn.hasTrailingUserInput,
+        compatMatch: session.compatibilityStamp === compatibilityStamp,
+        toolsCount: Array.isArray(request.tools) ? request.tools.length : 0,
+      },
+      "cursor-sdk cancelling prior run then sending on sticky agent"
+    );
+    await cancelActiveRun(session, {
+      rejectParked: true,
+      reason: `cursor-sdk lifecycle: ${softReason}`,
+      timeoutMs: 2_000,
+      poisonOnFailure: true,
+    });
+    throwIfCursorProducerAborted(options.abortSignal);
+  }
+
+  throwIfCursorProducerAborted(options.abortSignal);
+  refreshWorkspaceGuidance(session, promptHostEnv);
+
+  if (lifecyclePlan.action === "resume-parked") {
+    throwIfCursorProducerAborted(options.abortSignal);
+    logger?.info?.(
+      {
+        sessionKey: session.key,
+        agentId: session.agentId,
+        alignment,
+        matchedCount: lifecyclePlan.matches.length,
+        parkedCount: session.parked.length,
+      },
+      "cursor-sdk resuming parked run with host tool results"
+    );
+    const resolvedCount = globalSessionManager.resolveParkedTools(
+      session,
+      toolResults
+    );
+    if (resolvedCount !== toolResults.length || session.parked.length !== 0) {
+      throw new Error(
+        "cursor-sdk lifecycle changed while resolving exact parked tools"
+      );
+    }
+  }
+
+  // Stash for cache-outcome judgement (conversation cache, not prompt_cache_key).
+  if (context?.req) {
+    context.req._cursorCacheLifecycle = lifecycleForCache;
+  }
+
+  const shouldSendNewPrompt = lifecyclePlan.action !== "resume-parked";
+  const followUpOnly = lifecyclePlan.action === "send-incremental";
+  let runToken = session.activeRunToken;
+
+  const clearQueuedSdkMessages = (
+    targetSession: CursorSdkSession,
+    targetRunToken: symbol
+  ) => {
+    targetSession.pendingSdkMessages = targetSession.pendingSdkMessages.filter(
+      (entry) => entry.runToken !== targetRunToken
+    );
+    targetSession.notifySdkMessage();
+  };
+
+  const sdkSendOptionsForSession = (
+    targetSession: CursorSdkSession,
+    targetRunToken: symbol
+  ) => {
+    const customTools =
+      mode === "bridge"
+        ? toCustomTools(request, targetSession, logger, turnToolMetrics)
+        : undefined;
+    // Re-sending catalog params on a follow-up run is rejected for Grok 4.7
+    // after a cancelled parallel turn. The agent already has the bound model.
+    const sendModel = cursorModelSelectionsEqual(
+      targetSession.agent.model,
+      model
+    )
+      ? undefined
+      : model;
+    return {
+      ...(sendModel ? { model: sendModel } : {}),
+      mode: mode === "plan" ? ("plan" as const) : ("agent" as const),
+      local: customTools ? { customTools } : undefined,
+      onDelta: ({ update }: { update: any }) => {
+        const message = sdkMessageFromDelta(targetSession, update);
+        if (message) {
+          targetSession.enqueueSdkMessage(message, targetRunToken);
+        }
+      },
+    };
+  };
+
+  // Owned by this request, not the session: `execute` can fire before the
+  // response stream exists, so it must be counted independently of both the
+  // cumulative session metrics and any mid-request session replacement.
+  const turnToolMetrics = createTurnToolMetrics();
+
+  const toProviderError = (err: any) => {
+    dropCachedExchangeOnAuthError(apiKey, err);
+    return Object.assign(new Error(`Cursor SDK error: ${err?.message || err}`), {
+      statusCode: 502,
+      code: "provider_response_error",
+      type: "api_error",
+    });
+  };
+
+  // An agent created for this request already got the current selection, so
+  // a fresh one would be rejected the same way. Only an agent with earlier
+  // server-side state (sticky or resumed) can carry a stale registry binding.
+  const shouldReplayWithFreshSession = (err: any, targetSession: CursorSdkSession) =>
+    !options.abortSignal?.aborted &&
+    ((isCursorInvalidRegistryModelError(err) &&
+      (targetSession.hasSentPrompt || targetSession.resumedAgent)) ||
+      (targetSession.hasSentPrompt &&
+        (err?.retryFreshCursorSession === true ||
+          isCursorAgentBusyError(err) ||
+          isCursorSendPoisonError(err))));
+
+  const startNewPrompt = async (
+    targetSession: CursorSdkSession,
+    followUpOnlyForPrompt: boolean
+  ): Promise<symbol> => {
+    let nextRunToken: symbol | undefined;
+    await withSessionSendLock(targetSession, async () => {
+      if (targetSession.poisoned) {
+        throw Object.assign(
+          new Error("cursor-sdk session is no longer safe for sends"),
+          { retryFreshCursorSession: true }
+        );
+      }
+
+      // Admission should have made this an idle, aligned session. Never use
+      // cancellation as permission to append to an opaque Cursor checkpoint.
+      if (
+        targetSession.run ||
+        targetSession.streamIterator ||
+        targetSession.streamNext ||
+        targetSession.activeRunToken ||
+        targetSession.parked.length > 0
+      ) {
+        markSessionPoisoned(
+          targetSession,
+          "cursor-sdk session became active after lifecycle admission"
+        );
+        throw Object.assign(
+          new Error("cursor-sdk session became active before prompt send"),
+          { retryFreshCursorSession: true }
+        );
+      }
+
+      // Stream cancellation poisons synchronously before it waits for this same
+      // lock. Do not send if cancellation started while the prior run was being
+      // retired.
+      if (targetSession.poisoned) {
+        throw Object.assign(
+          new Error("cursor-sdk session was retired during cancellation"),
+          { retryFreshCursorSession: true }
+        );
+      }
+
+      const bridgeGuidanceFingerprint =
+        mode === "bridge"
+          ? bridgePromptGuidanceFingerprint(
+              request,
+              targetSession.workspaceDir,
+              promptHostEnv
+            )
+          : undefined;
+      const includeBridgeGuidance =
+        mode === "bridge" &&
+        (!followUpOnlyForPrompt ||
+          targetSession.lastBridgePromptGuidanceFingerprint !==
+            bridgeGuidanceFingerprint);
+
+      const prompt = toSdkPrompt(request, {
+        mode,
+        workspaceDir: targetSession.workspaceDir,
+        followUpOnly: followUpOnlyForPrompt,
+        hostEnv: promptHostEnv,
+        turnIntent: options.turnIntent,
+        includeBridgeGuidance,
+      });
+
+      // Disambiguates backend misses CCR can't otherwise see: a re-included
+      // bridge preamble or a changed tool catalog rewrites the prompt prefix
+      // the Cursor backend caches on, even when our host transcript diff is
+      // appended-only. Compare promptHash across same-session turns.
+      logger?.debug?.(
+        {
+          sessionKey: targetSession.key,
+          agentId: targetSession.agentId,
+          followUpOnly: followUpOnlyForPrompt,
+          includeBridgeGuidance,
+          guidanceChanged:
+            bridgeGuidanceFingerprint !== undefined &&
+            targetSession.lastBridgePromptGuidanceFingerprint !==
+              bridgeGuidanceFingerprint,
+          toolsCount: Array.isArray(request.tools) ? request.tools.length : 0,
+          promptChars: prompt.text.length,
+          promptHash: createHash("sha256")
+            .update(prompt.text, "utf8")
+            .digest("hex")
+            .slice(0, 16),
+          promptImages: prompt.images?.length ?? 0,
+          modelId: model.id,
+          modelParams: model.params,
+        },
+        "cursor-sdk sending prompt to agent"
+      );
+
+      nextRunToken = Symbol("cursor-sdk-run");
+      targetSession.activeRunToken = nextRunToken;
+
+      try {
+        markLatency(ensureRequestLatency(context?.req), "upstreamFetchStart");
+        const run = await sendCursorPrompt(
+          targetSession,
+          prompt,
+          sdkSendOptionsForSession(targetSession, nextRunToken),
+          {
+            abortSignal: options.abortSignal,
+            logger,
+          }
+        );
+        markLatency(ensureRequestLatency(context?.req), "upstreamHeaders");
+        targetSession.run = run;
+        targetSession.activeRunToken = nextRunToken;
+        targetSession.streamIterator = run.stream()[Symbol.asyncIterator]();
+        targetSession.streamNext = undefined;
+        targetSession.streamNextRunToken = undefined;
+        targetSession.hasSentPrompt = true;
+        if (bridgeGuidanceFingerprint) {
+          targetSession.lastBridgePromptGuidanceFingerprint =
+            bridgeGuidanceFingerprint;
+        }
+        throwIfCursorProducerAborted(options.abortSignal);
+      } catch (err: any) {
+        if (nextRunToken && targetSession.activeRunToken === nextRunToken) {
+          targetSession.activeRunToken = undefined;
+          clearQueuedSdkMessages(targetSession, nextRunToken);
+        }
+        if (
+          options.abortSignal?.aborted ||
+          isCursorSendPoisonError(err) ||
+          isCursorAgentBusyError(err)
+        ) {
+          markSessionPoisoned(
+            targetSession,
+            options.abortSignal?.aborted
+              ? "cursor-sdk send aborted"
+              : "cursor-sdk send left session state unsafe"
+          );
+        }
+        logger?.error?.({ err }, "cursor-sdk agent.send failed");
+        throw err;
+      }
+    });
+    if (!nextRunToken) {
+      throw new Error("cursor-sdk agent.send did not produce a run token");
+    }
+    return nextRunToken;
+  };
+
+  if (shouldSendNewPrompt) {
+    try {
+      runToken = await startNewPrompt(session, followUpOnly);
+    } catch (err: any) {
+      const shouldReplay = shouldReplayWithFreshSession(err, session);
+      await retireCursorSession(session, {
+        reason: "cursor-sdk prompt send failed before streaming",
+      });
+      if (!shouldReplay) {
+        throw toProviderError(err);
+      }
+      throwIfCursorProducerAborted(options.abortSignal);
+      logger?.warn?.(
+        {
+          err,
+          sessionKey: session.key,
+          agentId: session.agentId,
+        },
+        "cursor-sdk retrying failed resumed send with fresh session"
+      );
+      session = await globalSessionManager.getOrCreate(sessionOptions);
+      throwIfCursorProducerAborted(options.abortSignal);
+      promptHostEnv = hostEnvForSession(session);
+      compatibilityStamp = compatibilityForSession(session);
+      refreshWorkspaceGuidance(session, promptHostEnv);
+      try {
+        runToken = await startNewPrompt(session, false);
+      } catch (retryErr: any) {
+        await retireCursorSession(session, {
+          reason: "cursor-sdk fresh replay send failed before streaming",
+        });
+        throw toProviderError(retryErr);
+      }
+    }
+  }
+
+  if (!runToken) {
+    runToken = Symbol("cursor-sdk-run");
+    session.activeRunToken = runToken;
+  }
+
+  const helpers = createSseHelpers(modelId, new TextEncoder());
+  const collected: Array<Record<string, unknown>> = [];
+  // Host-facing usage must be per CCR request. One SDK turn spans every CCR
+  // request needed to resolve its parked host tools, and usage arrives only
+  // after that whole turn ends. It therefore cannot account for an earlier
+  // parked CCR response (same constraint as cursor-opencode-provider).
+  const promptTokens = estimateRequestPromptTokens(request);
+  let outputChars = 0;
+  let sdkUsageRaw: OpenAiUsage | undefined;
+
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      /**
+       * Must run on every exit path. A bridge turn normally ends by emitting
+       * host tool calls and returning early, so a report placed on the
+       * run-completed path alone never fires for the common case.
+       */
+      const reportScratchViolations = () => {
+        if (turnToolMetrics.scratchViolations <= 0) return;
+        // Surfaces the "model thinks it is confined to its sandbox" failure
+        // per model, without needing debug-level logs.
+        logger?.warn?.(
+          {
+            sessionKey: session.key,
+            model: modelId,
+            scratchViolations: turnToolMetrics.scratchViolations,
+            scratchCorrections: turnToolMetrics.scratchCorrections,
+            metrics: session.metrics,
+            hostProjectRoot: promptHostEnv.projectRoot,
+          },
+          "cursor-sdk turn produced scratch-workspace tool paths"
+        );
+      };
+
+      const enqueue = (chunk: Record<string, unknown>) => {
+        collected.push(chunk);
+        if (wantsStream) {
+          markLatency(ensureRequestLatency(context?.req), "upstreamFirstByte");
+          controller.enqueue(helpers.encode(chunk));
+        }
+      };
+
+      const noteOutput = (text: string | undefined | null) => {
+        if (typeof text === "string" && text.length) outputChars += text.length;
+      };
+
+      const finishUsage = (): OpenAiUsage => {
+        const priorRaw = session.lastSdkUsageRaw;
+        const usage = buildAccurateUsageFromSdk(
+          sdkUsageRaw,
+          promptTokens,
+          outputChars,
+          priorRaw
+        );
+        if (sdkUsageRaw) session.lastSdkUsageRaw = sdkUsageRaw;
+        // Trace parity with cursor-opencode-provider formatTurnUsageValidation.
+        // The SDK turn-end usage message is the billed witness (same source as
+        // the provider's TurnEnded counters). When the runtime reports nothing
+        // for the turn, usage carries no cache field and the cache-outcome tap
+        // reports "unknown" instead of a bogus miss.
+        logger?.debug?.(
+          {
+            sessionKey: session.key,
+            promptTokens,
+            outputChars,
+            sdkUsageRaw,
+            priorRaw,
+            usage,
+            usageReported: sdkUsageRaw !== undefined,
+          },
+          "cursor-sdk usage validation"
+        );
+        return usage;
+      };
+
+      const commitHostTranscript = () => {
+        if (session.activeRunToken !== runToken) return;
+        const completion = accumulateChatCompletion(modelId, collected) as any;
+        const assistantMessage = completion?.choices?.[0]?.message;
+        if (!assistantMessage || assistantMessage.role !== "assistant") return;
+        session.transcriptCommit = createCursorTranscriptCommit(
+          request,
+          assistantMessage as UnifiedMessage
+        );
+        session.compatibilityStamp = compatibilityStamp;
+      };
+
+      const emitFinish = (reason: "stop" | "tool_calls") => {
+        const usage = finishUsage();
+        logger?.debug?.(
+          {
+            reason,
+            promptTokens: usage.prompt_tokens,
+            completionTokens: usage.completion_tokens,
+            outputChars,
+            sdkUsageRaw,
+            runUsage: session.run?.usage,
+          },
+          "cursor-sdk finish usage (request estimate + turn-end usage witness)"
+        );
+        enqueue(helpers.finish(reason, usage));
+        commitHostTranscript();
+      };
+
+      try {
+        let emittedHostTools = 0;
+        let sawAssistantText = false;
+        // Anthropic/Claude Code require thinking blocks before text/tool_use.
+        // Cursor can emit more thinking after assistant text; dropping those
+        // late deltas avoids "Content block is not a thinking block".
+        let allowThinking = true;
+        let emittedThinking = false;
+        let thinkingSigned = false;
+        let thinkingSource: "stream" | "delta" | undefined;
+        let currentRunAssistantText = "";
+        let progressContinuationAttempts = 0;
+
+        const flushThinkingSignature = () => {
+          if (!emittedThinking || thinkingSigned) return;
+          enqueue(helpers.thinkingSignature());
+          thinkingSigned = true;
+          allowThinking = false;
+        };
+
+        while (true) {
+          let continuedProgressTurn = false;
+          for await (const event of streamSessionEvents(
+            session,
+            mode,
+            runToken!,
+            options.abortSignal
+          )) {
+            // Keep the session out of idle/LRU eviction while SSE is live.
+            touchSession(session);
+            if (event.kind === "host_tool") {
+              if (mode !== "bridge") continue;
+              flushThinkingSignature();
+              allowThinking = false;
+              noteOutput(event.tool.name);
+              noteOutput(JSON.stringify(event.tool.args ?? {}));
+              enqueue(helpers.toolCall(event.tool, emittedHostTools));
+              emittedHostTools += 1;
+
+              // Emit all currently pending host tools, then finish this CCR turn.
+              while (session.pendingEmit.length) {
+                const tool = session.pendingEmit.shift()!;
+                noteOutput(tool.name);
+                noteOutput(JSON.stringify(tool.args ?? {}));
+                enqueue(helpers.toolCall(tool, emittedHostTools));
+                emittedHostTools += 1;
+              }
+              emitFinish("tool_calls");
+              // No SDK usage witness is available at this boundary: the turn
+              // remains open while customTools.execute waits for these host
+              // results. Waiting here would deadlock; attributing the eventual
+              // run-cumulative usage to this response would be fabricated.
+              if (wantsStream) controller.enqueue(helpers.encodeDone());
+              controller.close();
+              return;
+            }
+
+            if (event.kind === "end") {
+              if (event.aborted) {
+                throw Object.assign(
+                  new Error("cursor-sdk response producer aborted"),
+                  { name: "AbortError" }
+                );
+              }
+              if (
+                shouldContinueProgressOnlyTurn({
+                  mode,
+                  assistantText: currentRunAssistantText,
+                  emittedHostTools,
+                  continuationAttempts: progressContinuationAttempts,
+                })
+              ) {
+                if (session.activeRunToken === runToken) {
+                  session.streamIterator = undefined;
+                  session.streamNext = undefined;
+                  session.streamNextRunToken = undefined;
+                  session.run = undefined;
+                  session.activeRunToken = undefined;
+                }
+                progressContinuationAttempts += 1;
+                logger?.warn?.(
+                  {
+                    assistantText: currentRunAssistantText,
+                    attempt: progressContinuationAttempts,
+                  },
+                  "cursor-sdk continuing progress-only terminal turn"
+                );
+                const continuationRunToken = Symbol("cursor-sdk-run");
+                // The response cancel callback closes over runToken. Transfer
+                // ownership before awaiting send so cancellation cannot mistake
+                // this continuation for the already-finished prior run.
+                runToken = continuationRunToken;
+                session.activeRunToken = continuationRunToken;
+                await withSessionSendLock(session, async () => {
+                  if (session.poisoned || options.abortSignal?.aborted) {
+                    throw new Error(
+                      "cursor-sdk progress continuation aborted before send"
+                    );
+                  }
+
+                  const run = await sendCursorPrompt(
+                    session,
+                    progressOnlyContinuationPrompt(promptHostEnv),
+                    sdkSendOptionsForSession(session, continuationRunToken),
+                    {
+                      abortSignal: options.abortSignal,
+                      logger,
+                    }
+                  );
+                  // Publish the handles under the lock so a concurrent
+                  // retirement can always cancel a run whose send completed.
+                  session.run = run;
+                  session.activeRunToken = continuationRunToken;
+                  session.streamIterator =
+                    run.stream()[Symbol.asyncIterator]();
+                  session.streamNext = undefined;
+                  session.streamNextRunToken = undefined;
+                  session.hasSentPrompt = true;
+
+                  if (session.poisoned || options.abortSignal?.aborted) {
+                    throw new Error(
+                      "cursor-sdk progress continuation retired during send"
+                    );
+                  }
+                });
+                currentRunAssistantText = "";
+                continuedProgressTurn = true;
+                break;
+              }
+
+              flushThinkingSignature();
+              emitFinish("stop");
+              if (session.activeRunToken === runToken) {
+                session.streamIterator = undefined;
+                session.streamNext = undefined;
+                session.streamNextRunToken = undefined;
+                session.run = undefined;
+                session.activeRunToken = undefined;
+              }
+              if (wantsStream) controller.enqueue(helpers.encodeDone());
+              controller.close();
+              return;
+            }
+
+            const message = event.message;
+            if (!message) continue;
+
+            if (message.type === "assistant") {
+              for (const block of message.message?.content || []) {
+                if (block.type === "text" && block.text) {
+                  flushThinkingSignature();
+                  allowThinking = false;
+                  sawAssistantText = true;
+                  currentRunAssistantText += block.text;
+                  noteOutput(block.text);
+                  enqueue(helpers.content(block.text));
+                }
+                // tool_use blocks for custom tools are handled via parkHostTool emit path
+              }
+            } else if (message.type === "thinking") {
+              if (!allowThinking) continue;
+              const source = event.source || "stream";
+              if (thinkingSource && thinkingSource !== source) continue;
+              thinkingSource = source;
+              const text = coerceThinkingText((message as any).text);
+              if (text) {
+                emittedThinking = true;
+                noteOutput(text);
+                enqueue(helpers.thinking(text));
+              }
+            } else if (message.type === "usage") {
+              // A terminal SDK-turn witness may span several parked CCR
+              // request cycles; finishUsage maps only its bounded cache ratio.
+              sdkUsageRaw = usageFromSdk(message);
+            } else if (message.type === "status") {
+              if (message.status === "ERROR" || message.status === "CANCELLED") {
+                const statusError = Object.assign(
+                  new Error(
+                    message.message ||
+                      `Cursor run ${message.status.toLowerCase()}`
+                  ),
+                  {
+                    statusCode: 502,
+                    code: "provider_response_error",
+                    type: "api_error",
+                  }
+                );
+                dropCachedExchangeOnAuthError(apiKey, statusError);
+                throw statusError;
+              }
+              // Drain the SDK iterator after FINISHED. The SDK emits this status
+              // before it persists terminal metadata and closes the event buffer;
+              // the `end` branch above is the safe point for completion/recovery.
+            } else if (message.type === "tool_call" && mode !== "bridge") {
+              // plan/agent: ignore or narrate lightly in agent mode
+              if (mode === "agent" && message.name) {
+                flushThinkingSignature();
+                allowThinking = false;
+                const narrate = `\n[cursor tool ${message.status || "running"}: ${message.name}]\n`;
+                noteOutput(narrate);
+                enqueue(helpers.content(narrate));
+              }
+            }
+          }
+          if (!continuedProgressTurn) break;
+        }
+
+        if (!sawAssistantText && !emittedHostTools) {
+          flushThinkingSignature();
+          emitFinish("stop");
+        }
+
+        if (wantsStream) controller.enqueue(helpers.encodeDone());
+        controller.close();
+      } catch (err: any) {
+        dropCachedExchangeOnAuthError(apiKey, err);
+        logger?.error?.(
+          {
+            err,
+            metrics: session.metrics,
+          },
+          "cursor-sdk stream failed"
+        );
+        if (
+          !isCursorAuthenticationError(err) &&
+          isCursorTransientProviderError(err)
+        ) {
+          // Throttling / overload is not session corruption: keep the warm
+          // sticky agent so the retry reuses it instead of paying a cold
+          // start. The next request's lifecycle planner soft-cancels the dead
+          // run before sending.
+          logger?.warn?.(
+            {
+              sessionKey: session.key,
+              agentId: session.agentId,
+              err,
+            },
+            "cursor-sdk keeping sticky session after transient provider error"
+          );
+        } else {
+          // Retire before surfacing the error so a reconnect cannot overtake SDK
+          // cleanup and send on the same still-active agent.
+          await retireCursorSession(session, {
+            reason: "cursor-sdk stream failed before terminal state",
+            onlyRunToken: runToken,
+          });
+        }
+        try {
+          controller.error(err);
+        } catch {
+          // already closed
+        }
+      } finally {
+        reportScratchViolations();
+      }
+    },
+    async cancel() {
+      // Returning this promise makes Web/Node stream cancellation a teardown
+      // barrier instead of detached cleanup racing the user's next request.
+      await retireCursorSession(session, {
+        reason: "cursor-sdk client cancelled stream",
+        onlyRunToken: runToken,
+      });
+    },
+  });
+
+  if (!wantsStream) {
+    // Materialize the stream into a single chat.completion JSON.
+    const reader = stream.getReader();
+    while (true) {
+      const { done } = await reader.read();
+      if (done) break;
+    }
+    const completion = accumulateChatCompletion(modelId, collected);
+    return new Response(JSON.stringify(completion), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  return new Response(stream, {
+    status: 200,
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    },
+  });
+}

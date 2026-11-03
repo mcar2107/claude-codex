@@ -1,0 +1,368 @@
+import type { ChatCompletionMessageParam as OpenAIMessage } from "openai/resources/chat/completions";
+import type { MessageParam as AnthropicMessage } from "@anthropic-ai/sdk/resources/messages";
+import type { ChatCompletionChunk } from "openai/resources/chat/completions";
+import type { MessageStreamEvent } from "@anthropic-ai/sdk/resources/messages";
+import type { ChatCompletionTool } from "openai/resources/chat/completions";
+import type { Tool as AnthropicTool } from "@anthropic-ai/sdk/resources/messages";
+import { Transformer } from "./transformer";
+import type { ProviderTokenizerConfig } from "./tokenizer";
+import type { RequestScopedErrorRule } from "@/utils/request-scoped-errors";
+
+export type TransformerConfigEntry = string | [string, Record<string, any>?];
+
+export interface UrlCitation {
+  url: string;
+  title: string;
+  content: string;
+  start_index: number;
+  end_index: number;
+}
+export interface Annotation {
+  type: "url_citation";
+  url_citation?: UrlCitation;
+}
+
+/**
+ * A provider-executed web search (e.g. Anthropic's server `web_search`),
+ * surfaced so clients can render the call itself (Responses `web_search_call`).
+ * Internal: Chat Completions clients never receive it.
+ */
+export interface WebSearchCall {
+  id: string;
+  query: string;
+  status: "completed" | "failed";
+}
+
+// Content type definitions
+export interface TextContent {
+  type: "text";
+  text: string;
+  cache_control?: {
+    type?: string;
+    ttl?: "5m" | "1h";
+  };
+}
+
+export interface ImageContent {
+  type: "image_url";
+  image_url: {
+    url: string;
+  };
+  media_type: string;
+  cache_control?: {
+    type?: string;
+    ttl?: "5m" | "1h";
+  };
+}
+
+export type MessageContent = TextContent | ImageContent;
+
+// Unified message interface
+export interface UnifiedMessage {
+  role: "user" | "assistant" | "system" | "tool";
+  content: string | null | MessageContent[];
+  reasoning_content?: string;
+  tool_calls?: Array<{
+    id: string;
+    type: "function";
+    function: {
+      name: string;
+      arguments: string;
+    };
+    /** Gemini/Antigravity thought signature; must round-trip on functionCall parts. */
+    thought_signature?: string;
+    cache_control?: {
+      type?: string;
+      ttl?: "5m" | "1h";
+    };
+  }>;
+  tool_call_id?: string;
+  cache_control?: {
+    type?: string;
+    ttl?: "5m" | "1h";
+  };
+  thinking?: {
+    content: string;
+    /** Anthropic thinking signature; never treat as Responses ciphertext. */
+    signature?: string;
+    /** Provider-minted Responses/Codex reasoning ciphertext for replay. */
+    encrypted_content?: string;
+    /** Responses reasoning item id (`rs_…`); not interchangeable with ciphertext. */
+    id?: string;
+  };
+}
+
+// Unified tool definition interface
+export interface UnifiedTool {
+  type: "function";
+  function: {
+    name: string;
+    description: string;
+    strict?: boolean;
+    parameters: {
+      type: "object";
+      properties: Record<string, any>;
+      required?: string[];
+      additionalProperties?: boolean;
+      $schema?: string;
+    };
+  };
+  cache_control?: {
+    type?: string;
+    ttl?: "5m" | "1h";
+  };
+}
+
+export const THINK_LEVELS = [
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra",
+] as const;
+
+export type ThinkLevel = (typeof THINK_LEVELS)[number];
+
+// Unified request interface
+export interface UnifiedChatRequest {
+  messages: UnifiedMessage[];
+  model: string;
+  system?: string | MessageContent[];
+  max_tokens?: number;
+  max_completion_tokens?: number;
+  temperature?: number;
+  top_p?: number;
+  top_k?: number;
+  repetition_penalty?: number;
+  stream?: boolean;
+  stream_options?: {
+    include_usage?: boolean;
+    [key: string]: any;
+  };
+  tools?: UnifiedTool[];
+  tool_choice?:
+    | "auto"
+    | "none"
+    | "required"
+    | string
+    | { type: "function"; function: { name: string } };
+  reasoning?: {
+    // OpenAI-style
+    effort?: ThinkLevel;
+    /**
+     * Request readable reasoning text from destinations that gate it
+     * (Responses `reasoning.summary`, Codex, etc.). `"none"` opts out.
+     */
+    summary?: "auto" | "detailed" | "concise" | "none";
+
+    // Anthropic-style
+    max_tokens?: number;
+
+    enabled?: boolean;
+  };
+  enable_thinking?: boolean;
+  thinking?: {
+    type: "enabled" | "disabled";
+    budget_tokens?: number;
+  };
+  parallel_tool_calls?: boolean;
+  /** Stable client-provided affinity for provider prompt caching. */
+  prompt_cache_key?: string;
+  cache_control?: {
+    type?: string;
+    ttl?: "5m" | "1h";
+  };
+
+  // Pass-through fields for Anthropic-specific parameters.
+  // These survive the Anthropic → Unified → Anthropic roundtrip so that
+  // claude-auth can rebuild the original request body accurately.
+  anthropic_thinking?: Record<string, any>;
+  anthropic_output_config?: Record<string, any>;
+  anthropic_metadata?: Record<string, any>;
+  anthropic_stop_sequences?: string[];
+  /**
+   * Anthropic-defined (typed) tools for legacy direct claude-auth callers,
+   * like the other anthropic_* fields. Routed requests carry them in
+   * `protocolContext.anthropicSource.tools` so no other provider sees them.
+   */
+  anthropic_tools?: Record<string, any>[];
+  reasoning_effort?: string;
+
+  /**
+   * Responses opaque `include` list (e.g. `reasoning.encrypted_content`).
+   * Client-driven: only set when the inbound protocol was Responses and the
+   * client sent it. Chat/Anthropic clients have no equivalent field.
+   */
+  include?: string[];
+  /**
+   * Responses `store`. Only `false` is preserved (CCR rejects `store: true`).
+   * Client-driven same-protocol hint, paired with `include` by OpenCode/AI SDK.
+   */
+  store?: false;
+}
+
+// Unified response interface
+export interface UnifiedChatResponse {
+  id: string;
+  model: string;
+  content: string | null;
+  usage?: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+  };
+  tool_calls?: Array<{
+    id: string;
+    type: "function";
+    function: {
+      name: string;
+      arguments: string;
+    };
+  }>;
+  annotations?: Annotation[];
+  web_search_calls?: WebSearchCall[];
+}
+
+// Streaming response related types
+export interface StreamChunk {
+  id: string;
+  object: string;
+  created: number;
+  model: string;
+  choices?: Array<{
+    index: number;
+    delta: {
+      role?: string;
+      content?: string;
+      thinking?: {
+        content?: string;
+        signature?: string;
+        encrypted_content?: string;
+        id?: string;
+      };
+      tool_calls?: Array<{
+        id?: string;
+        type?: "function";
+        function?: {
+          name?: string;
+          arguments?: string;
+        };
+        thought_signature?: string;
+      }>;
+      annotations?: Annotation[];
+      web_search_calls?: WebSearchCall[];
+    };
+    finish_reason?: string | null;
+  }>;
+}
+
+// Anthropic streaming event types
+export type AnthropicStreamEvent = MessageStreamEvent;
+
+// OpenAI stream chunk types
+export type OpenAIStreamChunk = ChatCompletionChunk;
+
+// OpenAI specific types
+export interface OpenAIChatRequest {
+  messages: OpenAIMessage[];
+  model: string;
+  max_tokens?: number;
+  temperature?: number;
+  stream?: boolean;
+  tools?: ChatCompletionTool[];
+  tool_choice?:
+    | "auto"
+    | "none"
+    | { type: "function"; function: { name: string } };
+}
+
+// Anthropic specific types
+export interface AnthropicChatRequest {
+  messages: AnthropicMessage[];
+  model: string;
+  max_tokens: number;
+  temperature?: number;
+  stream?: boolean;
+  system?: string;
+  tools?: AnthropicTool[];
+  tool_choice?: { type: "auto" } | { type: "tool"; name: string };
+}
+
+// Conversion options
+export interface ConversionOptions {
+  targetProvider: "openai" | "anthropic";
+  sourceProvider: "openai" | "anthropic";
+}
+
+export interface LLMProvider {
+  name: string;
+  baseUrl: string;
+  apiKey: string;
+  models: string[];
+  /** Optional GCP / Antigravity project id (provider-specific). */
+  project_id?: string;
+  /**
+   * Request-scoped error rules for this provider (CLIProxyAPI port).
+   * Evaluated before global rules; first match decides stop vs continue.
+   * The provider service stores rules only under this canonical key.
+   */
+  request_scoped_errors?: RequestScopedErrorRule[];
+  transformer?: {
+    [key: string]: {
+      use?: Transformer[];
+    } | any;
+  } & {
+    use?: Transformer[];
+    passthrough?: any;
+  };
+}
+
+/**
+ * Accepted input spellings of the request-scoped error rule list. The
+ * provider service folds them into `request_scoped_errors`.
+ */
+export interface RequestScopedErrorsCarrier {
+  request_scoped_errors?: RequestScopedErrorRule[];
+  requestScopedErrors?: RequestScopedErrorRule[];
+  "request-scoped-errors"?: RequestScopedErrorRule[];
+}
+
+export type RegisterProviderRequest = LLMProvider & RequestScopedErrorsCarrier;
+
+/** Provider update payload; any rule-list spelling replaces the stored rules. */
+export type ProviderUpdate = Partial<LLMProvider> & RequestScopedErrorsCarrier;
+
+export interface ModelRoute {
+  provider: string;
+  model: string;
+  fullModel: string;
+}
+
+export interface RequestRouteInfo {
+  provider: LLMProvider;
+  originalModel: string;
+  targetModel: string;
+}
+
+/** Request-scoped error rules use any RequestScopedErrorsCarrier spelling. */
+export interface ConfigProvider extends RequestScopedErrorsCarrier {
+  name: string;
+  api_base_url: string;
+  api_key: string;
+  models: string[];
+  /** Optional GCP / Antigravity project id (kept as `$ENV` placeholders in config). */
+  project_id?: string;
+  transformer: {
+    use?: TransformerConfigEntry[];
+  } & {
+    [key: string]:
+      | {
+          use?: TransformerConfigEntry[];
+        }
+      | any;
+  };
+  tokenizer?: ProviderTokenizerConfig;
+}

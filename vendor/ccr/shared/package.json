@@ -1,0 +1,38 @@
+{
+  "name": "@caeliq/ccr-shared",
+  "version": "2.1.16",
+  "description": "Shared utilities and constants for Claude Code Router",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "bun ../../scripts/build-shared.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src"
+  },
+  "keywords": [
+    "claude",
+    "code",
+    "router",
+    "shared"
+  ],
+  "author": "caeliq",
+  "license": "MIT",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "adm-zip": "^0.6.1",
+    "json5": "^2.2.3"
+  },
+  "devDependencies": {
+    "@types/adm-zip": "^0.5.8",
+    "@types/node": "^26.6.5",
+    "esbuild": "^0.28.2",
+    "typescript": "^6.0.3"
+  },
+  "engines": {
+    "bun": ">=1.4.0"
+  }
+}

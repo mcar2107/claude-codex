@@ -1,0 +1,2 @@
+# Keep upstream bytes exact so vendor/ccr/original-sha256.json stays verifiable.
+vendor/** -text

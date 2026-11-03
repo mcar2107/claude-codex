@@ -1,0 +1,200 @@
+import { Transformer, TransformerConstructor } from "@/types/transformer";
+import { ConfigService } from "./config";
+import Transformers from "@/transformer";
+
+interface TransformerConfig {
+  transformers: Array<{
+    name: string;
+    type: "class" | "module";
+    path?: string;
+    options?: any;
+  }>;
+}
+
+export class TransformerService {
+  private transformers: Map<string, Transformer | TransformerConstructor> =
+    new Map();
+
+  constructor(
+    private readonly configService: ConfigService,
+    private readonly logger: any
+  ) {}
+
+  registerTransformer(name: string, transformer: Transformer): void {
+    this.transformers.set(name, transformer);
+    this.logger.info(
+      `register transformer: ${name}${
+        transformer.endPoint
+          ? ` (endpoint: ${transformer.endPoint})`
+          : " (no endpoint)"
+      }`
+    );
+  }
+
+  getTransformer(
+    name: string
+  ): Transformer | TransformerConstructor | undefined {
+    return this.transformers.get(name);
+  }
+
+  getAllTransformers(): Map<string, Transformer | TransformerConstructor> {
+    return new Map(this.transformers);
+  }
+
+  getTransformersWithEndpoint(): { name: string; transformer: Transformer }[] {
+    const result: { name: string; transformer: Transformer }[] = [];
+    // Several transformers legitimately share one wire format (`openai` and
+    // `vercel` both declare /v1/chat/completions). Fastify rejects duplicate
+    // routes, so the first registration for an endpoint wins.
+    const claimedEndpoints = new Map<string, string>();
+
+    const claim = (name: string, transformer: Transformer): void => {
+      const endPoint = transformer.endPoint;
+      if (!endPoint) return;
+      const owner = claimedEndpoints.get(endPoint);
+      if (owner) {
+        this.logger?.debug?.(
+          `transformer ${name} shares endpoint ${endPoint} with ${owner}; keeping ${owner}`
+        );
+        return;
+      }
+      claimedEndpoints.set(endPoint, name);
+      result.push({ name, transformer });
+    };
+
+    this.transformers.forEach((transformer, name) => {
+      // Instance with endPoint (anthropic, openai, …)
+      if (typeof transformer === "object") {
+        claim(name, transformer);
+        return;
+      }
+      // Constructor registered via static TransformerName (gemini, vercel, …).
+      // `endPoint` is declared as a class field, so it exists only on an
+      // instance — build a default (no-options) one so configuring
+      // ["gemini", opts] does not silently drop the native endpoint route.
+      if (typeof transformer === "function") {
+        try {
+          const instance = new (transformer as TransformerConstructor)();
+          if (instance && typeof instance === "object") {
+            (instance as any).logger = this.logger;
+          }
+          claim(name, instance);
+        } catch (error: any) {
+          this.logger?.warn?.(
+            `transformer ${name} could not be instantiated for endpoint registration: ${error?.message}`
+          );
+        }
+      }
+    });
+
+    return result;
+  }
+
+  getTransformersWithoutEndpoint(): {
+    name: string;
+    transformer: Transformer;
+  }[] {
+    const result: { name: string; transformer: Transformer }[] = [];
+
+    this.transformers.forEach((transformer, name) => {
+      // Check if it's an instance without endPoint
+      if (typeof transformer === 'object' && !transformer.endPoint) {
+        result.push({ name, transformer });
+      }
+    });
+
+    return result;
+  }
+
+  removeTransformer(name: string): boolean {
+    return this.transformers.delete(name);
+  }
+
+  hasTransformer(name: string): boolean {
+    return this.transformers.has(name);
+  }
+
+  async registerTransformerFromConfig(config: {
+    path?: string;
+    options?: any;
+  }): Promise<boolean> {
+    try {
+      if (config.path) {
+        const module = require(require.resolve(config.path));
+        if (module) {
+          const instance = new module(config.options);
+          // Set logger for transformer instance
+          if (instance && typeof instance === "object") {
+            (instance as any).logger = this.logger;
+          }
+          if (!instance.name) {
+            throw new Error(
+              `Transformer instance from ${config.path} does not have a name property.`
+            );
+          }
+          this.registerTransformer(instance.name, instance);
+          return true;
+        }
+      }
+      return false;
+    } catch (error: any) {
+      this.logger.error(
+        `load transformer (${config.path}) \nerror: ${error.message}\nstack: ${error.stack}`
+      );
+      return false;
+    }
+  }
+
+  async initialize(): Promise<void> {
+    try {
+      await this.registerDefaultTransformersInternal();
+      await this.loadFromConfig();
+    } catch (error: any) {
+      this.logger.error(
+        `TransformerService init error: ${error.message}\nStack: ${error.stack}`
+      );
+    }
+  }
+
+  private async registerDefaultTransformersInternal(): Promise<void> {
+    try {
+      Object.values(Transformers).forEach(
+        (TransformerStatic: any) => {
+          if (
+            "TransformerName" in TransformerStatic &&
+            typeof TransformerStatic.TransformerName === "string"
+          ) {
+            this.registerTransformer(
+              TransformerStatic.TransformerName,
+              TransformerStatic
+            );
+          } else {
+            const transformerInstance = new TransformerStatic();
+            // Set logger for transformer instance
+            if (
+              transformerInstance &&
+              typeof transformerInstance === "object"
+            ) {
+              (transformerInstance as any).logger = this.logger;
+            }
+            this.registerTransformer(
+              transformerInstance.name!,
+              transformerInstance
+            );
+          }
+        }
+      );
+    } catch (error) {
+      this.logger.error({ error }, "transformer regist error:");
+    }
+  }
+
+  private async loadFromConfig(): Promise<void> {
+    const transformers = this.configService.get<
+      TransformerConfig["transformers"]
+    >("transformers", []);
+    for (const transformer of transformers) {
+      await this.registerTransformerFromConfig(transformer);
+    }
+  }
+}

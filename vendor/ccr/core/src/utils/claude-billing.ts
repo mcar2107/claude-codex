@@ -1,0 +1,427 @@
+import { createHash } from "crypto";
+import { TextContent, UnifiedChatRequest, UnifiedMessage } from "@/types/llm";
+import { CLAUDE_CODE_BILLING_SYSTEM_HEADER_PREFIX } from "./router";
+import { createSSEStreamReader, emitSSEEvent, forwardSSEEvent } from "./stream";
+
+/** Salt used in Claude Code's `cc_version` suffix hash (`RYn()`). */
+export const BILLING_SALT = "59cf53e54c78";
+// Frozen current Claude Code reference used by third-party emulation. Update
+// intentionally with a new golden profile when the CLI reference changes.
+export const CC_VERSION = process.env.ANTHROPIC_CLI_VERSION || "2.1.280";
+// Claude Code uses different fallbacks for the HTTP user agent and billing
+// attribution marker in the current 2.1.280 build.
+export const CC_ENTRYPOINT = process.env.CLAUDE_CODE_ENTRYPOINT ?? "unknown";
+export const CC_USER_AGENT_ENTRYPOINT =
+  process.env.CLAUDE_CODE_ENTRYPOINT ?? "cli";
+export const SYSTEM_IDENTITY =
+  "You are Claude Code, Anthropic's official CLI for Claude.";
+
+function textOfContent(content: UnifiedMessage["content"]): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    const firstText = content.find(
+      (part): part is TextContent => part.type === "text"
+    );
+    return firstText?.text ?? "";
+  }
+  return "";
+}
+
+export function extractFirstUserMessageText(
+  messages: UnifiedMessage[] | undefined
+): string {
+  const firstUser = messages?.find((msg) => msg.role === "user");
+  return firstUser ? textOfContent(firstUser.content) : "";
+}
+
+export function computeVersionSuffix(text: string, version: string): string {
+  const sample = [4, 7, 20].map((i) => text[i] || "0").join("");
+  return createHash("sha256")
+    .update(BILLING_SALT + sample + version)
+    .digest("hex")
+    .slice(0, 3);
+}
+
+/**
+ * Current first-party Anthropic requests use the literal cch marker. Older
+ * captures showed a random session value; the current 2.1.280 decompilation
+ * gates this field to first-party/Vertex and emits `00000`.
+ */
+export function sessionCch(): string {
+  return "00000";
+}
+
+export function __resetClaudeBillingStateForTests(): void {
+  // Kept as a test compatibility hook; the current marker is stateless.
+}
+
+export function buildClaudeBillingHeaderValue(
+  messages: UnifiedMessage[] | undefined,
+  version: string = CC_VERSION,
+  entrypoint: string = CC_ENTRYPOINT
+): string {
+  const attributionSetting = process.env.CLAUDE_CODE_ATTRIBUTION_HEADER
+    ?.trim()
+    .toLowerCase();
+  if (["0", "false", "no", "off"].includes(attributionSetting || "")) {
+    return "";
+  }
+
+  const suffix = computeVersionSuffix(
+    extractFirstUserMessageText(messages),
+    version
+  );
+  return (
+    `${CLAUDE_CODE_BILLING_SYSTEM_HEADER_PREFIX}: cc_version=${version}.${suffix}; ` +
+    `cc_entrypoint=${entrypoint}; cch=${sessionCch()};`
+  );
+}
+
+/**
+ * Normalize `request.system` to an array as a complete ordered fold:
+ * top-level `request.system` blocks first, then every `role:"system"` /
+ * `role:"developer"` message's text blocks in source order. Consumed messages
+ * are removed from `request.messages` so no downstream builder can drop or
+ * double-emit them. Block-level `cache_control` is preserved.
+ */
+export function normalizeSystemToArray(
+  request: UnifiedChatRequest
+): TextContent[] {
+  const blocks: TextContent[] = [];
+
+  const pushContent = (content: UnifiedMessage["content"] | undefined) => {
+    if (typeof content === "string") {
+      if (content) blocks.push({ type: "text", text: content });
+      return;
+    }
+    if (!Array.isArray(content)) return;
+    for (const part of content) {
+      if (part?.type === "text" && part.text) {
+        const block: TextContent = { type: "text", text: part.text };
+        if (part.cache_control !== undefined) {
+          block.cache_control = part.cache_control;
+        }
+        blocks.push(block);
+      }
+    }
+  };
+
+  if (typeof request.system === "string" || Array.isArray(request.system)) {
+    pushContent(request.system as UnifiedMessage["content"]);
+  }
+
+  if (Array.isArray(request.messages)) {
+    const remaining: UnifiedMessage[] = [];
+    for (const message of request.messages) {
+      if (
+        message.role === "system" ||
+        (message.role as string) === "developer"
+      ) {
+        pushContent(message.content);
+      } else {
+        remaining.push(message);
+      }
+    }
+    request.messages = remaining;
+  }
+
+  request.system = blocks;
+  return blocks;
+}
+
+/** Drop any existing billing entry (dedupe) and prepend a fresh one at system[0]. */
+export function applyClaudeBillingSystemBlock(
+  system: TextContent[],
+  messages: UnifiedMessage[] | undefined
+): void {
+  fillClaudeBillingSystemBlock(
+    system,
+    reserveClaudeBillingSystemBlock(system),
+    messages
+  );
+}
+
+/**
+ * Drop any existing billing entry (dedupe) and reserve system[0] for a fresh
+ * one, so applyClaudeSystemIdentity places identity right after it. The value
+ * samples the first user text as sent, which relocation may still change, so
+ * fill it afterwards with fillClaudeBillingSystemBlock.
+ */
+export function reserveClaudeBillingSystemBlock(
+  system: TextContent[]
+): TextContent {
+  for (let i = system.length - 1; i >= 0; i--) {
+    if (system[i].text.startsWith(CLAUDE_CODE_BILLING_SYSTEM_HEADER_PREFIX)) {
+      system.splice(i, 1);
+    }
+  }
+  const block: TextContent = {
+    type: "text",
+    text: CLAUDE_CODE_BILLING_SYSTEM_HEADER_PREFIX,
+  };
+  system.unshift(block);
+  return block;
+}
+
+/** Fill a reserved billing block; remove it when attribution is disabled. */
+export function fillClaudeBillingSystemBlock(
+  system: TextContent[],
+  block: TextContent,
+  messages: UnifiedMessage[] | undefined
+): void {
+  const index = system.indexOf(block);
+  if (index < 0) return;
+  const billing = buildClaudeBillingHeaderValue(messages);
+  if (billing) block.text = billing;
+  else system.splice(index, 1);
+}
+
+/**
+ * Insert SYSTEM_IDENTITY after the billing block (normally system[1], or
+ * system[0] when attribution is disabled). Any remaining caller system
+ * content is left in place here — relocateForeignSystemContent (called
+ * separately, afterwards) is what moves it out of system[].
+ */
+export function applyClaudeSystemIdentity(system: TextContent[]): void {
+  const billingIndex = system.findIndex((block) =>
+    block.text.startsWith(CLAUDE_CODE_BILLING_SYSTEM_HEADER_PREFIX)
+  );
+  const candidateIndex = billingIndex >= 0 ? billingIndex + 1 : 0;
+  const candidate = system[candidateIndex];
+
+  if (candidate?.text === SYSTEM_IDENTITY) return;
+
+  if (
+    candidate?.text.startsWith(SYSTEM_IDENTITY) &&
+    candidate.text.length > SYSTEM_IDENTITY.length
+  ) {
+    const remainder: TextContent = {
+      type: "text",
+      text: candidate.text.slice(SYSTEM_IDENTITY.length),
+    };
+    if (candidate.cache_control !== undefined) {
+      remainder.cache_control = candidate.cache_control;
+    }
+    system.splice(
+      candidateIndex,
+      1,
+      { type: "text", text: SYSTEM_IDENTITY },
+      remainder
+    );
+    return;
+  }
+
+  system.splice(candidateIndex, 0, { type: "text", text: SYSTEM_IDENTITY });
+}
+
+/**
+ * Move everything in `system[]` past the identity block into the first user
+ * message instead. Anthropic's OAuth billing validator appears to
+ * inspect `system[]` content beyond the identity prefix and reject requests
+ * whose system array carries a foreign harness prompt with an "out of extra
+ * usage" 400 — the same approach used by third-party Claude Code OAuth
+ * clients (e.g. opencode-claude-auth). The relocated text still reaches the
+ * model, just as part of the first user turn rather than
+ * `system[]`.
+ *
+ * A no-op when there is no user message to attach the content to, so nothing
+ * is silently dropped — the caller's system content stays in `system[]`
+ * instead.
+ *
+ * Returns the inserted block unless the first user message has non-empty
+ * string content (the relocated text is then a standalone block a cache
+ * breakpoint can end on); non-empty string content is prefixed in place and
+ * returns undefined.
+ */
+export function relocateForeignSystemContent(
+  system: TextContent[],
+  messages: UnifiedMessage[] | undefined
+): TextContent | undefined {
+  const identityIndex = system.findIndex(
+    (block) => block.text === SYSTEM_IDENTITY
+  );
+  if (identityIndex < 0 || system.length <= identityIndex + 1 || !Array.isArray(messages)) {
+    return undefined;
+  }
+
+  const firstUser = messages.find((msg) => msg.role === "user");
+  if (!firstUser) return undefined;
+
+  const foreign = system.splice(identityIndex + 1);
+  const text = foreign
+    .map((block) => block.text)
+    .filter((t) => t.length > 0)
+    .join("\n\n");
+  if (!text) return undefined;
+
+  if (typeof firstUser.content === "string" && firstUser.content) {
+    firstUser.content = `${text}\n\n${firstUser.content}`;
+    return undefined;
+  }
+  const block: TextContent = { type: "text", text };
+  if (Array.isArray(firstUser.content)) {
+    firstUser.content.unshift(block);
+  } else {
+    // Empty or non-text content carries nothing to prefix; the relocated
+    // prompt becomes the sole block so it can still take a breakpoint.
+    firstUser.content = [block];
+  }
+  return block;
+}
+
+/**
+ * Claude Code's OAuth validator expects tool names in the mcp_PascalCase
+ * spelling used by the official CLI. Non-Claude-Code clients commonly send
+ * ordinary names such as `bash` or `read`, so normalize them before the
+ * Anthropic body is built. The prefix check keeps this operation idempotent.
+ */
+export function prefixClaudeToolName(name: string): string {
+  if (/^mcp_[A-Z]/.test(name)) return name;
+  return `mcp_${name.charAt(0).toUpperCase()}${name.slice(1)}`;
+}
+
+/** Restore a Claude Code tool name to the caller's original spelling. */
+export function unprefixClaudeToolName(name: string): string {
+  if (!name.startsWith("mcp_") || name.length <= 4) return name;
+  return `${name.charAt(4).toLowerCase()}${name.slice(5)}`;
+}
+
+/** Rewrite tool names in a Unified request in place for the OAuth wire path. */
+export function prefixClaudeToolNames(
+  request: UnifiedChatRequest,
+  nameMap?: Map<string, string>,
+  fixedNames: Iterable<string> = []
+): void {
+  // Anthropic-defined tools (e.g. `web_search`) keep their fixed names, as in
+  // Claude Code's own requests; only custom tool names are rewritten.
+  const keep = new Set(fixedNames);
+  const prefix = (name: string): string => {
+    if (keep.has(name)) return name;
+    const wireName = prefixClaudeToolName(name);
+    nameMap?.set(wireName, name);
+    return wireName;
+  };
+
+  if (Array.isArray(request.tools)) {
+    for (const tool of request.tools) {
+      if (tool?.function?.name) tool.function.name = prefix(tool.function.name);
+    }
+  }
+
+  if (Array.isArray(request.messages)) {
+    for (const message of request.messages) {
+      for (const toolCall of message.tool_calls ?? []) {
+        if (toolCall?.function?.name) {
+          toolCall.function.name = prefix(toolCall.function.name);
+        }
+      }
+    }
+  }
+
+  if (typeof request.tool_choice === "string") {
+    if (!["auto", "none", "required"].includes(request.tool_choice)) {
+      request.tool_choice = prefix(request.tool_choice);
+    }
+  } else if (
+    request.tool_choice?.type === "function" &&
+    request.tool_choice.function?.name
+  ) {
+    request.tool_choice.function.name = prefix(request.tool_choice.function.name);
+  }
+}
+
+/**
+ * Rewrite tool names in a response payload in place and report whether any
+ * name changed. Accepts both shapes a response takes after the provider leg:
+ * Unified/OpenAI (`choices[].message|delta.tool_calls`) and Anthropic
+ * Messages wire (`content[]` tool_use blocks of a message, or the
+ * `content_block_start` stream event that carries a tool_use block's name).
+ *
+ * With a request-local `nameMap`, only names CCR itself prefixed are restored,
+ * which keeps the operation idempotent: a caller's own `mcp__server__tool`
+ * name is never stripped a second time. Without one, fall back to the
+ * spelling heuristic.
+ */
+export function unprefixClaudeToolNames(
+  value: any,
+  nameMap?: Map<string, string>
+): boolean {
+  let changed = false;
+  const restore = (name: unknown): string | undefined => {
+    if (typeof name !== "string") return undefined;
+    const original = nameMap ? nameMap.get(name) : unprefixClaudeToolName(name);
+    if (original === undefined || original === name) return undefined;
+    changed = true;
+    return original;
+  };
+  const rewriteToolCall = (toolCall: any) => {
+    const original = restore(toolCall?.function?.name);
+    if (original !== undefined) toolCall.function.name = original;
+  };
+  const rewriteToolUse = (block: any) => {
+    if (block?.type !== "tool_use") return;
+    const original = restore(block.name);
+    if (original !== undefined) block.name = original;
+  };
+
+  for (const choice of value?.choices ?? []) {
+    for (const toolCall of choice?.message?.tool_calls ?? []) rewriteToolCall(toolCall);
+    for (const toolCall of choice?.delta?.tool_calls ?? []) rewriteToolCall(toolCall);
+  }
+  if (value?.type === "message" && Array.isArray(value.content)) {
+    for (const block of value.content) rewriteToolUse(block);
+  }
+  if (value?.type === "content_block_start") {
+    rewriteToolUse(value.content_block);
+  }
+  return changed;
+}
+
+/**
+ * Restore CCR-prefixed tool names in a JSON or SSE response. SSE events and
+ * JSON bodies without a renamed tool are forwarded byte-identical, so
+ * exact-protocol responses keep the provider's usage and framing untouched.
+ */
+export async function restoreClaudeToolNamesInResponse(
+  response: Response,
+  nameMap: Map<string, string>,
+  logger?: any
+): Promise<Response> {
+  if (!nameMap.size || !response.ok) return response;
+  const contentType = response.headers.get("Content-Type") || "";
+  if (contentType.includes("application/json")) {
+    const text = await response.text();
+    let body: any;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = undefined;
+    }
+    const changed = body !== undefined && unprefixClaudeToolNames(body, nameMap);
+    return new Response(changed ? JSON.stringify(body) : text, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    });
+  }
+  if (contentType.includes("text/event-stream") && response.body) {
+    return createSSEStreamReader(response, {
+      logger,
+      processEvent: (event, streamContext) => {
+        if (
+          event.data &&
+          typeof event.data === "object" &&
+          unprefixClaudeToolNames(event.data, nameMap)
+        ) {
+          emitSSEEvent(
+            { event: event.event, id: event.id, retry: event.retry, data: event.data },
+            streamContext
+          );
+          return;
+        }
+        forwardSSEEvent(event, streamContext);
+      },
+    });
+  }
+  return response;
+}
