@@ -30,16 +30,23 @@ const show = () => {
 const discoveryCache = (items: unknown[]) => {
   return items.reduce<Omit<ModelsCache, 'refreshedAt'>>(
     (cache, item) => {
-      if (typeof item !== 'object' || item === null) return cache;
+      if (typeof item !== 'object' || item === null) {
+        return cache;
+      }
+
       const id: unknown = Reflect.get(item, 'slug') || Reflect.get(item, 'id');
 
-      if (!state.isModelId(id) || cache.models.includes(id)) return cache;
+      if (!state.isModelId(id) || cache.models.includes(id)) {
+        return cache;
+      }
+
       cache.models.push(id);
       const size: unknown =
         Reflect.get(item, 'context_window') || Reflect.get(item, 'max_context_window');
 
-      if (typeof size === 'number' && Number.isInteger(size) && size > 0)
+      if (typeof size === 'number' && Number.isInteger(size) && size > 0) {
         cache.contextWindows[id] = size;
+      }
 
       return cache;
     },
@@ -55,7 +62,9 @@ const nextSettings = (command: string, rest: string[]): Settings | undefined => 
     case 'show':
 
     case 'status': {
-      if (rest.length) throw new Error(SETTINGS_USAGE);
+      if (rest.length) {
+        throw new Error(SETTINGS_USAGE);
+      }
 
       return undefined;
     }
@@ -63,14 +72,17 @@ const nextSettings = (command: string, rest: string[]): Settings | undefined => 
     case 'set': {
       const parsed = parseOverrides(rest);
 
-      if (parsed.rest.length || !Object.keys(parsed.overrides).length)
+      if (parsed.rest.length || !Object.keys(parsed.overrides).length) {
         throw new Error('Usage: claude-codex settings set --model GPT-ID --effort LEVEL');
+      }
 
       return { ...state.readSettings(), ...parsed.overrides };
     }
 
     case 'reset': {
-      if (rest.length) throw new Error(SETTINGS_USAGE);
+      if (rest.length) {
+        throw new Error(SETTINGS_USAGE);
+      }
 
       return state.DEFAULT_SETTINGS;
     }
@@ -78,8 +90,9 @@ const nextSettings = (command: string, rest: string[]): Settings | undefined => 
     case 'preset': {
       const preset = rest.length === 1 ? PRESETS.get(rest[0]) : undefined;
 
-      if (!preset)
+      if (!preset) {
         throw new Error(`Unknown preset. Choose ${[...PRESETS.keys()].join('|')}`);
+      }
 
       return preset;
     }
@@ -94,7 +107,10 @@ export const settings = (args: string[]) => {
   const [command = 'show', ...rest] = args;
   const next = nextSettings(command, rest);
 
-  if (!next) return show();
+  if (!next) {
+    return show();
+  }
+
   state.saveSettings(next);
   show();
   console.log(
@@ -106,7 +122,10 @@ export const settings = (args: string[]) => {
  * Список моделей из ответа discovery: у одних версий API он в `models`, у других — в `data`.
  */
 const discoveryItems = (data: unknown): unknown[] | undefined => {
-  if (typeof data !== 'object' || data === null) return undefined;
+  if (typeof data !== 'object' || data === null) {
+    return undefined;
+  }
+
   const models: unknown = Reflect.get(data, 'models');
   const items: unknown = Array.isArray(models) ? models : Reflect.get(data, 'data');
 
@@ -114,8 +133,9 @@ const discoveryItems = (data: unknown): unknown[] | undefined => {
 };
 
 export const models = async (args: string[]) => {
-  if (args.length && (args.length !== 1 || args[0] !== 'refresh'))
+  if (args.length && (args.length !== 1 || args[0] !== 'refresh')) {
     throw new Error('Usage: claude-codex models [refresh]');
+  }
 
   if (args[0] === 'refresh') {
     const { validTokens } = await import('./auth');
@@ -129,16 +149,21 @@ export const models = async (args: string[]) => {
       client_version: version,
     };
 
-    if (tokens.account_id) headers['ChatGPT-Account-Id'] = tokens.account_id;
+    if (tokens.account_id) {
+      headers['ChatGPT-Account-Id'] = tokens.account_id;
+    }
+
     const response = await fetch(
       `https://chatgpt.com/backend-api/codex/models?client_version=${encodeURIComponent(version)}`,
       { headers, signal: AbortSignal.timeout(30000) }
     );
 
-    if (!response.ok)
+    if (!response.ok) {
       throw new Error(
         `Model discovery failed (HTTP ${response.status}); saved settings and discovery cache preserved`
       );
+    }
+
     let data: unknown;
 
     try {
@@ -149,19 +174,23 @@ export const models = async (args: string[]) => {
 
     const items = discoveryItems(data);
 
-    if (!items)
+    if (!items) {
       throw new Error(
         'Unexpected model discovery response; saved settings and cache preserved'
       );
+    }
+
     const discovered = discoveryCache(items);
 
     /**
      * Пустой список — скорее сбой discovery, чем аккаунт без моделей: прежний кэш полезнее.
      */
-    if (!discovered.models.length)
+    if (!discovered.models.length) {
       throw new Error(
         'Model discovery returned no models; saved settings and cache preserved'
       );
+    }
+
     state.writeJson(state.MODELS_CACHE_FILE, {
       refreshedAt: new Date().toISOString(),
       ...discovered,
@@ -183,6 +212,8 @@ export const models = async (args: string[]) => {
   }
 
   console.log('Configured candidates (not a promise of account access):');
-  for (const model of [...new Set([...state.MODELS, state.readSettings().model])])
+
+  for (const model of [...new Set([...state.MODELS, state.readSettings().model])]) {
     console.log(`${model}: ${state.effortsFor(model).join(', ')}`);
+  }
 };

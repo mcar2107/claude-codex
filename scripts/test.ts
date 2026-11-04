@@ -39,7 +39,10 @@ if (isStandalone) {
     }
   );
 
-  if (compile.status !== 0) throw new Error('Could not compile standalone test harness');
+  if (compile.status !== 0) {
+    throw new Error('Could not compile standalone test harness');
+  }
+
   command = output;
   args = [];
 }
@@ -55,4 +58,7 @@ const result = spawnSync(command, args, {
  * сигналом.
  */
 process.exitCode = result.status ?? 1;
-if (result.error) throw result.error;
+
+if (result.error) {
+  throw result.error;
+}

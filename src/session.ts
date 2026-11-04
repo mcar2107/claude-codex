@@ -94,16 +94,26 @@ export const parseOverrides = (args: string[]): ParsedOverrides => {
     }
 
     if (arg === '--model' || arg === '--effort') {
-      if (!args[i + 1] || args[i + 1].startsWith('-'))
+      if (!args[i + 1] || args[i + 1].startsWith('-')) {
         throw new Error(`Missing value for ${arg}`);
+      }
+
       overrides[arg === '--model' ? 'model' : 'reasoningEffort'] = args[++i];
     } else if (arg.startsWith('--model=')) {
-      if (!arg.slice(8)) throw new Error('Missing value for --model');
+      if (!arg.slice(8)) {
+        throw new Error('Missing value for --model');
+      }
+
       overrides.model = arg.slice(8);
     } else if (arg.startsWith('--effort=')) {
-      if (!arg.slice(9)) throw new Error('Missing value for --effort');
+      if (!arg.slice(9)) {
+        throw new Error('Missing value for --effort');
+      }
+
       overrides.reasoningEffort = arg.slice(9);
-    } else rest.push(arg);
+    } else {
+      rest.push(arg);
+    }
   }
 
   return { overrides, rest };
@@ -117,8 +127,10 @@ export const internalRouter = async (session: string | undefined) => {
     !key ||
     !/^[a-f0-9]{64}$/.test(key) ||
     !path.resolve(session).startsWith(state.RUNTIME_DIR + path.sep)
-  )
+  ) {
     throw new Error('Internal router requires a private session');
+  }
+
   /**
    * Ни учётные данные, ни локальный ключ сессии не печатаются и не попадают в метаданные.
    */
@@ -139,7 +151,10 @@ export const internalRouter = async (session: string | undefined) => {
   let isStopping = false;
 
   const handleStop = async () => {
-    if (isStopping) return;
+    if (isStopping) {
+      return;
+    }
+
     isStopping = true;
     const deadline = setTimeout(() => {
       return process.exit(1);
@@ -154,7 +169,10 @@ export const internalRouter = async (session: string | undefined) => {
     }
   };
 
-  for (const name of SESSION_SIGNALS) process.on(name, handleStop);
+  for (const name of SESSION_SIGNALS) {
+    process.on(name, handleStop);
+  }
+
   process.stdin.resume();
   /**
    * Смерть родителя закрывает pipe — даже после SIGKILL.
@@ -185,8 +203,10 @@ export const withRouter = async <T>(
     CLAUDE_CODEX_STATE_DIR: state.RUNTIME_DIR,
   };
 
-  for (const [key, value] of Object.entries(overrides))
+  for (const [key, value] of Object.entries(overrides)) {
     env[key === 'model' ? 'CLAUDE_CODEX_MODEL' : 'CLAUDE_CODEX_EFFORT'] = value;
+  }
+
   const key = crypto.randomBytes(32).toString('hex');
   const session = fs.mkdtempSync(path.join(state.RUNTIME_DIR, 'session-'));
   const [command, ...args] = selfCommand(['__router', session]);
@@ -205,7 +225,9 @@ export const withRouter = async <T>(
     controller.abort(signal);
   };
 
-  for (const name of SESSION_SIGNALS) process.on(name, handleSignal);
+  for (const name of SESSION_SIGNALS) {
+    process.on(name, handleSignal);
+  }
 
   try {
     const child = spawn(command, args, {
@@ -240,7 +262,9 @@ export const withRouter = async <T>(
           return;
         }
 
-        if (value) resolve(value);
+        if (value) {
+          resolve(value);
+        }
       };
 
       const onAbort = () => {
@@ -257,9 +281,14 @@ export const withRouter = async <T>(
 
       const onData = (chunk: Buffer) => {
         output += chunk.toString();
-        if (output.length > MAX_STARTUP_OUTPUT)
+
+        if (output.length > MAX_STARTUP_OUTPUT) {
           return finish(new Error('Unexpected CCR startup output'));
-        if (!output.includes('\n')) return;
+        }
+
+        if (!output.includes('\n')) {
+          return;
+        }
 
         let parsed: unknown;
 
@@ -271,8 +300,11 @@ export const withRouter = async <T>(
            */
         }
 
-        if (isRouterMetadata(parsed)) finish(null, parsed);
-        else finish(new Error('Invalid CCR startup response'));
+        if (isRouterMetadata(parsed)) {
+          finish(null, parsed);
+        } else {
+          finish(new Error('Invalid CCR startup response'));
+        }
       };
 
       const timer = setTimeout(() => {
@@ -283,12 +315,20 @@ export const withRouter = async <T>(
       child.once('error', onError);
       child.once('exit', onExit);
       controller.signal.addEventListener('abort', onAbort, { once: true });
-      if (controller.signal.aborted) onAbort();
+
+      if (controller.signal.aborted) {
+        onAbort();
+      }
     });
 
-    if (!/^http:\/\/127\.0\.0\.1:\d+$/.test(metadata.base))
+    if (!/^http:\/\/127\.0\.0\.1:\d+$/.test(metadata.base)) {
       throw new Error('Invalid router address');
-    if (controller.signal.aborted) throw new Error('Session cancelled');
+    }
+
+    if (controller.signal.aborted) {
+      throw new Error('Session cancelled');
+    }
+
     /**
      * Вычитываем pipe, хотя вывода роутера больше не ждём.
      */
@@ -325,7 +365,9 @@ export const withRouter = async <T>(
 
       fs.rmSync(session, { recursive: true, force: true });
     } finally {
-      for (const name of SESSION_SIGNALS) process.removeListener(name, handleSignal);
+      for (const name of SESSION_SIGNALS) {
+        process.removeListener(name, handleSignal);
+      }
     }
   }
 };

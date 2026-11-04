@@ -18,7 +18,10 @@ const SLOTS: Record<string, keyof RateLimits> = {
 };
 
 const numeric = (value: string | null) => {
-  if (value === null || !value.trim()) return undefined;
+  if (value === null || !value.trim()) {
+    return undefined;
+  }
+
   const parsed = Number(value);
 
   return Number.isFinite(parsed) ? parsed : undefined;
@@ -30,7 +33,10 @@ const numeric = (value: string | null) => {
 const resetTime = (headers: Headers, slot: string, now: number) => {
   const at = numeric(headers.get(`x-codex-${slot}-reset-at`));
 
-  if (at !== undefined) return Math.round(at);
+  if (at !== undefined) {
+    return Math.round(at);
+  }
+
   const after = numeric(headers.get(`x-codex-${slot}-reset-after-seconds`));
 
   return after === undefined ? undefined : Math.round(now / 1000 + after);
@@ -48,15 +54,24 @@ export const codexRateLimits = (
   const limits = Object.entries(SLOTS).reduce<RateLimits>((result, [slot, fallback]) => {
     const used = numeric(headers.get(`x-codex-${slot}-used-percent`));
 
-    if (used === undefined) return result;
+    if (used === undefined) {
+      return result;
+    }
+
     const minutes = numeric(headers.get(`x-codex-${slot}-window-minutes`));
     const key = minutes === undefined ? fallback : WINDOWS[minutes];
 
-    if (!key) return result;
+    if (!key) {
+      return result;
+    }
+
     const resetsAt = resetTime(headers, slot, now);
     const window: RateLimitWindow = { used_percentage: used };
 
-    if (resetsAt !== undefined) window.resets_at = resetsAt;
+    if (resetsAt !== undefined) {
+      window.resets_at = resetsAt;
+    }
+
     result[key] = window;
 
     return result;

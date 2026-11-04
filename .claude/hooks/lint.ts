@@ -139,11 +139,17 @@ const runFailure = (
   timeoutMs: number,
   expected: number[]
 ): string[] | undefined => {
-  if (result.isTimedOut)
+  if (result.isTimedOut) {
     return [`[${name}] timed out after ${timeoutMs / 1000}s — not checked`];
-  if (result.signalCode)
+  }
+
+  if (result.signalCode) {
     return [`[${name}] killed by ${result.signalCode} — not checked`];
-  if (result.exitCode !== null && expected.includes(result.exitCode)) return undefined;
+  }
+
+  if (result.exitCode !== null && expected.includes(result.exitCode)) {
+    return undefined;
+  }
 
   return [
     `[${name}] crashed (exit ${result.exitCode}):`,
@@ -159,15 +165,21 @@ const toRelative = (cwd: string, candidate: string) => {
   const absolute = path.resolve(cwd, candidate);
   const relative = path.relative(ROOT, absolute);
 
-  if (!relative || relative.startsWith('..') || path.isAbsolute(relative))
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
     return undefined;
-  if (!LINTED_FILE.test(relative)) return undefined;
+  }
+
+  if (!LINTED_FILE.test(relative)) {
+    return undefined;
+  }
+
   if (
     IGNORED_DIRECTORIES.some((directory) => {
       return relative.startsWith(directory);
     })
-  )
+  ) {
     return undefined;
+  }
 
   try {
     return fs.statSync(absolute).isFile() ? relative : undefined;
@@ -210,12 +222,16 @@ const readCheckedLog = (): CheckedLog => {
  */
 const writeCheckedLog = (log: CheckedLog, files: string[], now: number) => {
   const next = Object.entries(log).reduce<CheckedLog>((result, [file, mtime]) => {
-    if (now - mtime <= MTIME_WINDOW_MS) result[file] = mtime;
+    if (now - mtime <= MTIME_WINDOW_MS) {
+      result[file] = mtime;
+    }
 
     return result;
   }, {});
 
-  for (const file of files) next[file] = fs.statSync(path.join(ROOT, file)).mtimeMs;
+  for (const file of files) {
+    next[file] = fs.statSync(path.join(ROOT, file)).mtimeMs;
+  }
 
   try {
     fs.mkdirSync(path.dirname(CHECKED_LOG), { recursive: true });
@@ -244,17 +260,23 @@ const editedFiles = (input: unknown, now: number, checked: CheckedLog) => {
   if (filePath) {
     const relative = toRelative(cwd, filePath);
 
-    if (relative) files.add(relative);
+    if (relative) {
+      files.add(relative);
+    }
   }
 
   for (const [candidate] of command.matchAll(COMMAND_PATH)) {
     const relative = toRelative(cwd, candidate);
 
-    if (!relative) continue;
+    if (!relative) {
+      continue;
+    }
+
     const { mtimeMs } = fs.statSync(path.join(ROOT, relative));
 
-    if (now - mtimeMs <= MTIME_WINDOW_MS && checked[relative] !== mtimeMs)
+    if (now - mtimeMs <= MTIME_WINDOW_MS && checked[relative] !== mtimeMs) {
       files.add(relative);
+    }
   }
 
   return [...files];
@@ -278,8 +300,10 @@ const isEslintResults = (value: unknown): value is EslintFileResult[] => {
  * eslint одним процессом по всем файлам: typed-lint поднимает проект TypeScript один раз.
  */
 const lintEslint = async (files: string[]): Promise<LintOutcome> => {
-  if (!fs.existsSync(ESLINT_BIN))
+  if (!fs.existsSync(ESLINT_BIN)) {
     return crashed([`[eslint] binary not found at ${ESLINT_BIN}; run bun install`]);
+  }
+
   const result = await run(
     [ESLINT_BIN, '--format', 'json', '--no-warn-ignored', ...files],
     ESLINT_TIMEOUT_MS
@@ -289,7 +313,10 @@ const lintEslint = async (files: string[]): Promise<LintOutcome> => {
    */
   const failure = runFailure('eslint', result, ESLINT_TIMEOUT_MS, [0, 1]);
 
-  if (failure) return crashed(failure);
+  if (failure) {
+    return crashed(failure);
+  }
+
   let parsed: unknown;
 
   try {
@@ -298,11 +325,13 @@ const lintEslint = async (files: string[]): Promise<LintOutcome> => {
     parsed = undefined;
   }
 
-  if (!isEslintResults(parsed))
+  if (!isEslintResults(parsed)) {
     return crashed([
       '[eslint] unparseable JSON output:',
       result.stdout.slice(0, MAX_CRASH_OUTPUT),
     ]);
+  }
+
   /**
    * Errors — вперёд: отчёт режется по `MAX_REPORT_LINES`, и блокирующие замечания не должны
    * утонуть за warnings.
@@ -324,8 +353,9 @@ const lintEslint = async (files: string[]): Promise<LintOutcome> => {
     { errors: [], warnings: [] }
   );
 
-  if (!errors.length && !warnings.length)
+  if (!errors.length && !warnings.length) {
     return { hasErrors: false, hasCrashed: false, report: [] };
+  }
 
   return {
     hasErrors: errors.length > 0,
@@ -345,9 +375,13 @@ const parseTsc = (output: string) => {
     const [, file] = line.match(TSC_FILE_DIAGNOSTIC) || [];
     const last = diagnostics.at(-1);
 
-    if (file) diagnostics.push({ file, text: line });
-    else if (TSC_CONFIG_DIAGNOSTIC.test(line)) diagnostics.push({ text: line });
-    else if (last && /^\s/.test(line)) last.text += `\n${line}`;
+    if (file) {
+      diagnostics.push({ file, text: line });
+    } else if (TSC_CONFIG_DIAGNOSTIC.test(line)) {
+      diagnostics.push({ text: line });
+    } else if (last && /^\s/.test(line)) {
+      last.text += `\n${line}`;
+    }
 
     return diagnostics;
   }, []);
@@ -359,8 +393,10 @@ const parseTsc = (output: string) => {
  * транзитивно) — предупреждение, чтобы агент не застрял на чужом долге.
  */
 const lintTsc = async (edited: string[]): Promise<LintOutcome> => {
-  if (!fs.existsSync(TSC_BIN))
+  if (!fs.existsSync(TSC_BIN)) {
     return crashed([`[tsc] binary not found at ${TSC_BIN}; run bun install`]);
+  }
+
   fs.mkdirSync(path.join(ROOT, path.dirname(TSC_CACHE)), { recursive: true });
   const result = await run(
     [
@@ -380,14 +416,19 @@ const lintTsc = async (edited: string[]): Promise<LintOutcome> => {
    */
   const failure = runFailure('tsc', result, TSC_TIMEOUT_MS, [0, 1, 2]);
 
-  if (failure) return crashed(failure);
+  if (failure) {
+    return crashed(failure);
+  }
+
   const diagnostics = parseTsc(result.stdout);
 
-  if (result.exitCode !== 0 && !diagnostics.length)
+  if (result.exitCode !== 0 && !diagnostics.length) {
     return crashed([
       `[tsc] exit ${result.exitCode} without diagnostics:`,
       (result.stdout || result.stderr).slice(0, MAX_CRASH_OUTPUT),
     ]);
+  }
+
   const { blocking, other } = diagnostics.reduce<TscGroups>(
     (groups, { file, text }) => {
       const isBlocking = !file || file.endsWith('.json') || edited.includes(file);
@@ -457,7 +498,10 @@ const outcomes = await Promise.all([
     : undefined,
 ]);
 
-if (files.length) writeCheckedLog(checked, files, now);
+if (files.length) {
+  writeCheckedLog(checked, files, now);
+}
+
 const report = outcomes
   .reduce<string[]>((lines, outcome) => {
     return [...lines, ...(outcome?.report || [])];
@@ -474,13 +518,15 @@ const hasCrashed = outcomes.some((outcome) => {
  * stderr агент видит только при exit 2; при exit 0 warnings и ошибки tsc в других файлах
  * доходят до него через `additionalContext`.
  */
-if (report && !hasErrors && !hasCrashed)
+if (report && !hasErrors && !hasCrashed) {
   process.stdout.write(
     JSON.stringify({
       hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: report },
     })
   );
-else if (report) process.stderr.write(`${report}\n`);
+} else if (report) {
+  process.stderr.write(`${report}\n`);
+}
 
 /**
  * Ошибки в правке важнее сбоя соседнего линтера: агенту нужен их отчёт.

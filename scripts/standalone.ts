@@ -18,18 +18,25 @@ const root = path.resolve(import.meta.dirname, '..');
  */
 const BUN_VERSION = '1.4.4';
 
-if (Bun.version !== BUN_VERSION)
+if (Bun.version !== BUN_VERSION) {
   throw new Error(
     `Standalone build currently requires Bun ${BUN_VERSION}; review and update runtime notices before changing it.`
   );
+}
+
 const native = `bun-${process.platform}-${process.arch}`;
 const args = process.argv.slice(2);
 
-if (args.length && (args.length !== 2 || args[0] !== '--target'))
+if (args.length && (args.length !== 2 || args[0] !== '--target')) {
   throw new Error(`Usage: bun scripts/standalone.ts [--target ${TARGETS.join('|')}]`);
+}
+
 const target = args[1] || native;
 
-if (!TARGETS.includes(target)) throw new Error('Unsupported standalone target');
+if (!TARGETS.includes(target)) {
+  throw new Error('Unsupported standalone target');
+}
+
 await build();
 const directory = path.join(root, 'artifacts', target);
 
@@ -48,10 +55,18 @@ const result = spawnSync(
   { stdio: 'inherit' }
 );
 
-if (result.error) throw result.error;
-if (result.status !== 0) throw new Error(`Standalone build failed (${result.status})`);
-for (const file of ['LICENSE', 'THIRD_PARTY_NOTICES.md', 'THIRD_PARTY_LICENSES.txt'])
+if (result.error) {
+  throw result.error;
+}
+
+if (result.status !== 0) {
+  throw new Error(`Standalone build failed (${result.status})`);
+}
+
+for (const file of ['LICENSE', 'THIRD_PARTY_NOTICES.md', 'THIRD_PARTY_LICENSES.txt']) {
   fs.copyFileSync(path.join(root, file), path.join(directory, file));
+}
+
 fs.copyFileSync(
   path.join(root, 'vendor/ccr/LICENSE'),
   path.join(directory, 'CCR-LICENSE')

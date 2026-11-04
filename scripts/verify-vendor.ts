@@ -15,23 +15,30 @@ export const verifyVendor = async () => {
     path.join(vendor, 'original-sha256.json')
   ).json();
 
-  if (typeof expected !== 'object' || expected === null)
+  if (typeof expected !== 'object' || expected === null) {
     throw new Error('vendor/ccr/original-sha256.json: expected a JSON object');
+  }
+
   const drifted = Object.entries(expected).reduce<string[]>((result, [file, hash]) => {
     const absolute = path.join(vendor, file);
     const actual = fs.existsSync(absolute)
       ? new Bun.CryptoHasher('sha256').update(fs.readFileSync(absolute)).digest('hex')
       : undefined;
 
-    if (actual !== hash) result.push(file);
+    if (actual !== hash) {
+      result.push(file);
+    }
 
     return result;
   }, []);
 
-  if (drifted.length)
+  if (drifted.length) {
     throw new Error(
       `vendor/ccr differs from upstream (original-sha256.json): ${drifted.join(', ')}`
     );
+  }
 };
 
-if (import.meta.main) await verifyVendor();
+if (import.meta.main) {
+  await verifyVendor();
+}

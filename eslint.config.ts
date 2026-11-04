@@ -99,6 +99,11 @@ export default defineConfig(
           singleLineTags: [],
         },
       ],
+      /**
+       * eslint-config-prettier выключает `curly`; вариант `all` с prettier не конфликтует. Без
+       * скобок `if` не считается block-like, и padding-line-between-statements его пропускает.
+       */
+      curly: ['error', 'all'],
       'arrow-body-style': ['error', 'always'],
       'arrow-parens': ['error', 'always'],
       /**

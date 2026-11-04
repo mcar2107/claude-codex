@@ -26,7 +26,9 @@ const ownerPackage = (file: string, nodeModules: string): BundledPackage | undef
     if (fs.existsSync(manifest)) {
       const pkg: PackageManifest = JSON.parse(fs.readFileSync(manifest, 'utf8'));
 
-      if (pkg.name && pkg.version) return { directory, pkg };
+      if (pkg.name && pkg.version) {
+        return { directory, pkg };
+      }
     }
 
     directory = path.dirname(directory);
@@ -64,10 +66,15 @@ export const writeLicenses = (metafile: BuildMetafile, root: string) => {
   for (const input of Object.keys(metafile.inputs)) {
     const file = path.resolve(root, input);
 
-    if (!file.startsWith(nodeModules + path.sep)) continue;
+    if (!file.startsWith(nodeModules + path.sep)) {
+      continue;
+    }
+
     const owner = ownerPackage(file, nodeModules);
 
-    if (owner) packages.set(`${owner.pkg.name}@${owner.pkg.version}`, owner);
+    if (owner) {
+      packages.set(`${owner.pkg.name}@${owner.pkg.version}`, owner);
+    }
   }
 
   const texts = [
@@ -100,17 +107,20 @@ export const writeLicenses = (metafile: BuildMetafile, root: string) => {
     if (!names.length) {
       const supplemental = SUPPLEMENTAL[`${pkg.name}@${pkg.version}`];
 
-      if (!supplemental)
+      if (!supplemental) {
         throw new Error(
           `Missing license text for bundled dependency ${pkg.name}@${pkg.version}`
         );
+      }
+
       texts.push(fs.readFileSync(path.join(root, 'licenses', supplemental), 'utf8'));
     }
 
-    for (const name of names)
+    for (const name of names) {
       texts.push(
         `\n--- ${name} ---\n${fs.readFileSync(path.join(directory, name), 'utf8')}\n`
       );
+    }
   }
 
   fs.writeFileSync(path.join(root, 'THIRD_PARTY_LICENSES.txt'), texts.join(''));

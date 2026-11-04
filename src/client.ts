@@ -65,12 +65,21 @@ export const extractSettings = (args: string[]): ExtractedSettings => {
 
     if (arg === '--settings') {
       value = args[++i];
-      if (value === undefined) throw new Error('Missing value for --settings');
-    } else if (arg.startsWith(SETTINGS_PREFIX)) value = arg.slice(SETTINGS_PREFIX.length);
-    else rest.push(arg);
+
+      if (value === undefined) {
+        throw new Error('Missing value for --settings');
+      }
+    } else if (arg.startsWith(SETTINGS_PREFIX)) {
+      value = arg.slice(SETTINGS_PREFIX.length);
+    } else {
+      rest.push(arg);
+    }
   }
 
-  if (value === undefined) return { settings: undefined, rest };
+  if (value === undefined) {
+    return { settings: undefined, rest };
+  }
+
   let parsed: unknown;
 
   try {
@@ -83,8 +92,9 @@ export const extractSettings = (args: string[]): ExtractedSettings => {
     });
   }
 
-  if (!state.isRecord(parsed))
+  if (!state.isRecord(parsed)) {
     throw new Error('Cannot read --settings: expected a JSON object or a JSON file');
+  }
 
   return { settings: parsed, rest };
 };
@@ -113,8 +123,9 @@ export const resolveStatusLine = (
     statusLine.type !== 'command' ||
     typeof statusLine.command !== 'string' ||
     !statusLine.command.trim()
-  )
+  ) {
     return undefined;
+  }
 
   return statusLine;
 };
@@ -162,12 +173,13 @@ const writePlugin = (directory: string) => {
   });
   fs.mkdirSync(path.join(directory, 'commands'), { recursive: true, mode: 0o700 });
 
-  for (const [name, { description, hint, command }] of Object.entries(PLUGIN_COMMANDS))
+  for (const [name, { description, hint, command }] of Object.entries(PLUGIN_COMMANDS)) {
     fs.writeFileSync(
       path.join(directory, 'commands', `${name}.md`),
       `---\ndescription: ${description}\nargument-hint: ${hint}\nallowed-tools: Bash(claude-codex:*)\n---\nRun this command with Bash and show its result:\n\n\`\`\`sh\n${command}\n\`\`\`\n\nSaved settings are defaults for new claude-codex sessions; switch this session with /model and /effort. Never read or print OAuth files.\n`,
       { mode: 0o600 }
     );
+  }
 };
 
 /**
@@ -223,20 +235,25 @@ export const prepareClient = ({
    * переменная перекрывает выбор, и модель в диалоге принимает это за отмену переключения.
    */
   delete env.ANTHROPIC_MODEL;
+
   for (const name of [
     'ANTHROPIC_DEFAULT_HAIKU_MODEL',
     'ANTHROPIC_DEFAULT_SONNET_MODEL',
     'ANTHROPIC_DEFAULT_OPUS_MODEL',
     'ANTHROPIC_DEFAULT_FABLE_MODEL',
-  ])
+  ]) {
     env[name] = model;
+  }
+
   /**
    * Окно контекста — только известное из discovery: без него Claude Code считает 200k.
    */
   const contextWindow = state.readModelsCache().contextWindows[active.model];
 
-  if (contextWindow && !env.CLAUDE_CODE_MAX_CONTEXT_TOKENS)
+  if (contextWindow && !env.CLAUDE_CODE_MAX_CONTEXT_TOKENS) {
     env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = String(contextWindow);
+  }
+
   const args = ['--model', model, '--settings', settingsFile, '--plugin-dir', plugin];
 
   /**
@@ -245,8 +262,11 @@ export const prepareClient = ({
    */
   const isClientEffort = CLIENT_EFFORTS.includes(active.reasoningEffort);
 
-  if (isClientEffort) args.push('--effort', active.reasoningEffort);
-  else if (!env.CLAUDE_CODE_EFFORT_LEVEL) env.CLAUDE_CODE_EFFORT_LEVEL = 'unset';
+  if (isClientEffort) {
+    args.push('--effort', active.reasoningEffort);
+  } else if (!env.CLAUDE_CODE_EFFORT_LEVEL) {
+    env.CLAUDE_CODE_EFFORT_LEVEL = 'unset';
+  }
 
   return [...args, ...rest];
 };
@@ -254,10 +274,15 @@ export const prepareClient = ({
 export const snapshotUserModel = (
   file = path.join(state.claudeConfigDir(), 'settings.json')
 ): UserModelSnapshot | undefined => {
-  if (!fs.existsSync(file)) return { file, hasModel: false };
+  if (!fs.existsSync(file)) {
+    return { file, hasModel: false };
+  }
+
   const settings = readSettingsFile(file);
 
-  if (!settings) return undefined;
+  if (!settings) {
+    return undefined;
+  }
 
   return 'model' in settings
     ? { file, hasModel: true, model: settings.model }
@@ -275,16 +300,25 @@ export const isClientModel = (value: unknown): value is string => {
  * восстановлении или `undefined`.
  */
 export const restoreUserModel = (snapshot: UserModelSnapshot | undefined) => {
-  if (!snapshot) return undefined;
+  if (!snapshot) {
+    return undefined;
+  }
+
   const current = readSettingsFile(snapshot.file);
 
-  if (!current || !isClientModel(current.model) || current.model === snapshot.model)
+  if (!current || !isClientModel(current.model) || current.model === snapshot.model) {
     return undefined;
+  }
+
   const replaced = current.model;
   const next = { ...current };
 
-  if (snapshot.hasModel) next.model = snapshot.model;
-  else delete next.model;
+  if (snapshot.hasModel) {
+    next.model = snapshot.model;
+  } else {
+    delete next.model;
+  }
+
   /**
    * Права файла пользователя сохраняются; симлинк на dotfiles остаётся симлинком (`writeJson`).
    */

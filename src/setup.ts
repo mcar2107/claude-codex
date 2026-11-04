@@ -9,10 +9,12 @@ import * as state from './state';
  * команды байт в байт: файл с другим текстом — чужой и не удаляется.
  */
 export const setup = (args: string[]) => {
-  if (args.length !== 1 || args[0] !== '--remove')
+  if (args.length !== 1 || args[0] !== '--remove') {
     throw new Error(
       'Session commands are built in (/codex:settings, /codex:models). Usage: claude-codex setup --remove'
     );
+  }
+
   const directory = path.join(state.claudeConfigDir(), 'commands');
   const files = Object.entries({
     'codex-settings': '$ARGUMENTS',
@@ -28,11 +30,17 @@ export const setup = (args: string[]) => {
   /**
    * Все цели проверяются до удаления: чужая команда с тем же именем не трогается.
    */
-  for (const item of files)
-    if (fs.existsSync(item.file) && fs.readFileSync(item.file, 'utf8') !== item.content)
+  for (const item of files) {
+    if (fs.existsSync(item.file) && fs.readFileSync(item.file, 'utf8') !== item.content) {
       throw new Error(`Refusing to remove a modified or foreign command: ${item.file}`);
+    }
+  }
+
   const removed = files.reduce((count, { file }) => {
-    if (!fs.existsSync(file)) return count;
+    if (!fs.existsSync(file)) {
+      return count;
+    }
+
     fs.unlinkSync(file);
 
     return count + 1;

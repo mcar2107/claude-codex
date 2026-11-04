@@ -44,7 +44,9 @@ const API_TIMEOUT_MS = 120_000;
  * Служебные файлы сессии — для statusline и проверки; сбой записи не должен ронять ответ модели.
  */
 const writeQuietly = (file: string | undefined, data: unknown) => {
-  if (!file) return;
+  if (!file) {
+    return;
+  }
 
   try {
     state.writeJson(file, data);
@@ -67,7 +69,10 @@ export const createRouter = async ({
   /**
    * Пустой ключ совпал бы с запросом без ключа: `timingSafeEqual` двух пустых буферов — `true`.
    */
-  if (!key) throw new Error('Router requires a non-empty session key');
+  if (!key) {
+    throw new Error('Router requires a non-empty session key');
+  }
+
   /**
    * Настройки читаются один раз, на старте сессии: сохранённые позже — умолчания для новых сессий.
    * Иначе `settings set` из другого терминала менял бы открытую сессию, а несовместимая с её
@@ -98,12 +103,15 @@ export const createRouter = async ({
     const actual = Buffer.from(typeof token === 'string' ? token : '');
     const expected = Buffer.from(key);
 
-    if (actual.length !== expected.length || !timingSafeEqual(actual, expected))
+    if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
       return reply.code(401).send({
         error: { type: 'authentication_error', message: 'Invalid local session key' },
       });
-    if (!ALLOWED_ROUTES.includes(request.url.split('?')[0]))
+    }
+
+    if (!ALLOWED_ROUTES.includes(request.url.split('?')[0])) {
       return reply.code(404).send({ error: { message: 'Not found' } });
+    }
   });
   /**
    * Модель выбирает клиент (`/model`), но только среди моделей Codex: ID без префикса `codex,`
@@ -117,8 +125,10 @@ export const createRouter = async ({
       !MODEL_ROUTES.includes(request.url.split('?')[0]) ||
       typeof body !== 'object' ||
       body === null
-    )
+    ) {
       return;
+    }
+
     const requested: unknown = Reflect.get(body, 'model');
     const outputConfig: unknown = Reflect.get(body, 'output_config');
 
@@ -134,8 +144,9 @@ export const createRouter = async ({
         ? requested.slice(state.CLIENT_PREFIX.length)
         : undefined;
 
-    if (!state.isModelId(id))
+    if (!state.isModelId(id)) {
       Reflect.set(body, 'model', state.CLIENT_PREFIX + startup.model);
+    }
   });
   const route = state.CLIENT_PREFIX + startup.model;
   const configService = new ConfigService({
@@ -224,13 +235,19 @@ export const createRouter = async ({
     async transformResponseOut(response: Response, context?: TransformerContext) {
       const limits = codexRateLimits(response.headers);
 
-      if (limits) writeQuietly(limitsFile, limits);
+      if (limits) {
+        writeQuietly(limitsFile, limits);
+      }
+
       const record =
         typeof context?.req === 'object' && context.req !== null
           ? lastRequests.get(context.req)
           : undefined;
 
-      if (!record || !response.ok || !response.body) return response;
+      if (!record || !response.ok || !response.body) {
+        return response;
+      }
+
       /**
        * Модель ответа Codex — в первом событии стрима; клиент получает свою копию потока.
        */
@@ -240,8 +257,9 @@ export const createRouter = async ({
         try {
           const returnedModel = await probeResponseModel(probe, context?.signal);
 
-          if (returnedModel && record === latestRecord)
+          if (returnedModel && record === latestRecord) {
             writeQuietly(requestFile, { ...record, returnedModel });
+          }
         } catch {
           /**
            * Зонд не бросает, но и сбой здесь касается только диагностического файла.
@@ -272,11 +290,12 @@ export const createRouter = async ({
   app.post<CountTokensRoute>('/v1/messages/count_tokens', async (request, reply) => {
     const { body } = request;
 
-    if (typeof body !== 'object' || body === null || !Array.isArray(body.messages))
+    if (typeof body !== 'object' || body === null || !Array.isArray(body.messages)) {
       return reply.code(400).send({
         type: 'error',
         error: { type: 'invalid_request_error', message: 'messages: expected an array' },
       });
+    }
 
     return {
       input_tokens: calculateTokenCount(body.messages, body.system, body.tools),

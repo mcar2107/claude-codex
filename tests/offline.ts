@@ -233,13 +233,16 @@ try {
     const upstreamRequest: CapturedRequest = JSON.parse(String(opts?.body));
 
     captured = upstreamRequest;
-    if (upstreamError)
+
+    if (upstreamError) {
       return new Response(
         JSON.stringify({
           error: { message: 'Mock request rejected', type: 'invalid_request_error' },
         }),
         { status: upstreamError, headers: { 'Content-Type': 'application/json' } }
       );
+    }
+
     const response = upstreamResponse(upstreamRequest.model, output);
     const cancellation = cancellationProbe;
 
@@ -248,8 +251,10 @@ try {
         Promise.withResolvers<ReadableStreamDefaultController<Uint8Array>>();
       const stream = new ReadableStream<Uint8Array>({
         start(controller) {
-          for (const frame of streamFrames(response).slice(0, 4))
+          for (const frame of streamFrames(response).slice(0, 4)) {
             controller.enqueue(new TextEncoder().encode(frame));
+          }
+
           onOpen(controller);
         },
         cancel() {
@@ -359,13 +364,16 @@ try {
       assert.equal(sent.reasoning.effort, reasoningEffort);
       assert.equal(sent.stream, true);
       assert.equal(sent.store, false);
-      if (model !== 'gpt-future-test')
+
+      if (model !== 'gpt-future-test') {
         assert.equal(sent.input[0].type, 'additional_tools', model);
-      else
+      } else {
         assert(
           sent.tools?.length,
           'Unknown future IDs use standard Responses until the transport catalog recognizes Lite'
         );
+      }
+
       assert.equal(result.json().content[0].text, 'ok');
     }
 
@@ -398,10 +406,12 @@ try {
 
     const returnedBy = Date.now() + 2000;
 
-    while (!readLastRequest().returnedModel && Date.now() < returnedBy)
+    while (!readLastRequest().returnedModel && Date.now() < returnedBy) {
       await new Promise((resolve) => {
         return setTimeout(resolve, 10);
       });
+    }
+
     const lastRecord = readLastRequest();
 
     assert.deepEqual(lastRecord.client, { model: 'codex,gpt-5.5', effort: 'max' });
@@ -551,10 +561,12 @@ try {
     await reader.cancel().catch(() => {});
     const deadline = Date.now() + 3000;
 
-    while (!probe.isAborted && !probe.isCancelled && Date.now() < deadline)
+    while (!probe.isAborted && !probe.isCancelled && Date.now() < deadline) {
       await new Promise((resolve) => {
         return setTimeout(resolve, 20);
       });
+    }
+
     assert(
       probe.isAborted || probe.isCancelled,
       'client cancellation must abort upstream fetch or cancel its stream'

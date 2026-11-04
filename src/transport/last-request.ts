@@ -9,7 +9,10 @@ const PROBE_LIMIT = 64 * 1024;
  */
 export const responseEvent = (text: string) => {
   for (const line of text.split('\n')) {
-    if (!line.startsWith('data:')) continue;
+    if (!line.startsWith('data:')) {
+      continue;
+    }
+
     let event: unknown;
 
     try {
@@ -23,7 +26,10 @@ export const responseEvent = (text: string) => {
         ? Reflect.get(event, 'response')
         : undefined;
 
-    if (typeof response !== 'object' || response === null) continue;
+    if (typeof response !== 'object' || response === null) {
+      continue;
+    }
+
     const model: unknown = Reflect.get(response, 'model');
 
     return { model: typeof model === 'string' && model ? model : undefined };
@@ -60,11 +66,16 @@ export const probeResponseModel = async (
     while (text.length < PROBE_LIMIT) {
       const { done, value } = await reader.read();
 
-      if (done) break;
+      if (done) {
+        break;
+      }
+
       text += decoder.decode(value, { stream: true });
       const found = responseEvent(text);
 
-      if (found) return found.model;
+      if (found) {
+        return found.model;
+      }
     }
 
     return undefined;

@@ -12,20 +12,32 @@ const FORWARDED_SIGNALS: NodeJS.Signals[] = ['SIGTERM', 'SIGINT', 'SIGHUP'];
  * Окна снимка, которые ещё не сброшены: после сброса процент в снимке уже не правда.
  */
 const currentLimits = (limits: unknown, now: number): RateLimits | undefined => {
-  if (typeof limits !== 'object' || limits === null) return undefined;
+  if (typeof limits !== 'object' || limits === null) {
+    return undefined;
+  }
+
   const current = (['five_hour', 'seven_day'] as const).reduce<RateLimits>(
     (result, key) => {
       const window: unknown = Reflect.get(limits, key);
 
-      if (typeof window !== 'object' || window === null) return result;
+      if (typeof window !== 'object' || window === null) {
+        return result;
+      }
+
       const used: unknown = Reflect.get(window, 'used_percentage');
       const resetsAt: unknown = Reflect.get(window, 'resets_at');
 
-      if (typeof used !== 'number') return result;
+      if (typeof used !== 'number') {
+        return result;
+      }
+
       if (typeof resetsAt === 'number') {
-        if (resetsAt * 1000 > now)
+        if (resetsAt * 1000 > now) {
           result[key] = { used_percentage: used, resets_at: resetsAt };
-      } else result[key] = { used_percentage: used };
+        }
+      } else {
+        result[key] = { used_percentage: used };
+      }
 
       return result;
     },
@@ -55,8 +67,9 @@ export const withRateLimits = (input: string, limits: unknown, now = Date.now())
     typeof parsed !== 'object' ||
     parsed === null ||
     Reflect.get(parsed, 'rate_limits')
-  )
+  ) {
     return input;
+  }
 
   return JSON.stringify({ ...parsed, rate_limits: current });
 };
@@ -66,11 +79,17 @@ export const withRateLimits = (input: string, limits: unknown, now = Date.now())
  * пользователя. Вывод и код выхода — исходной команды.
  */
 export const statusline = async (session: string | undefined) => {
-  if (!session) throw new Error('Usage: claude-codex __statusline SESSION');
+  if (!session) {
+    throw new Error('Usage: claude-codex __statusline SESSION');
+  }
+
   const original = state.readJsonQuietly(path.join(session, STATUS_LINE_FILE));
   const command = state.isRecord(original) ? original.command : undefined;
 
-  if (typeof command !== 'string') return 0;
+  if (typeof command !== 'string') {
+    return 0;
+  }
+
   const input = await Bun.stdin.text();
   const output = withRateLimits(
     input,
@@ -91,10 +110,15 @@ export const statusline = async (session: string | undefined) => {
     };
 
     const cleanup = () => {
-      for (const name of FORWARDED_SIGNALS) process.removeListener(name, handleSignal);
+      for (const name of FORWARDED_SIGNALS) {
+        process.removeListener(name, handleSignal);
+      }
     };
 
-    for (const name of FORWARDED_SIGNALS) process.on(name, handleSignal);
+    for (const name of FORWARDED_SIGNALS) {
+      process.on(name, handleSignal);
+    }
+
     child.once('error', (error) => {
       cleanup();
       reject(error);

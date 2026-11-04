@@ -86,7 +86,10 @@ export const status = () => {
  * Ошибка хелпера CCR с подсказкой моста вместо команды upstream.
  */
 export const withBridgeHint = (error: unknown) => {
-  if (!(error instanceof Error)) return error;
+  if (!(error instanceof Error)) {
+    return error;
+  }
+
   const message = error.message.replace(UPSTREAM_AUTH_HINT, '`claude-codex auth login`');
 
   return message === error.message ? error : new Error(message, { cause: error });
@@ -202,8 +205,10 @@ export const login = async ({
         ]),
       });
 
-      if (!result.ok)
+      if (!result.ok) {
         throw new Error(`OAuth token exchange failed (HTTP ${result.status})`);
+      }
+
       let tokens: unknown;
 
       try {
@@ -212,8 +217,10 @@ export const login = async ({
         throw new Error('Invalid OAuth token exchange response');
       }
 
-      if (!isTokenExchange(tokens))
+      if (!isTokenExchange(tokens)) {
         throw new Error('OAuth exchange omitted required credentials');
+      }
+
       const idClaims = claims(tokens.id_token)['https://api.openai.com/auth'] || {};
 
       state.writeJson(state.AUTH_FILE, {
@@ -263,8 +270,10 @@ export const login = async ({
     }, timeout);
     const address = server.address();
 
-    if (!address || typeof address === 'string')
+    if (!address || typeof address === 'string') {
       throw new Error('OAuth callback is not listening');
+    }
+
     redirect = redirectUri(address.port);
     const url = new URL(`${AUTH_ORIGIN}/oauth/authorize`);
 
@@ -281,8 +290,13 @@ export const login = async ({
       codex_cli_simplified_flow: 'true',
       id_token_add_organizations: 'true',
     }).toString();
-    if (signal?.aborted) abort();
-    else await onUrl(url.toString(), address);
+
+    if (signal?.aborted) {
+      abort();
+    } else {
+      await onUrl(url.toString(), address);
+    }
+
     await done;
     console.log('OAuth credentials saved. Run: claude-codex doctor');
 
@@ -294,9 +308,11 @@ export const login = async ({
     process.removeListener('SIGINT', abort);
     process.removeListener('SIGTERM', abort);
     server.closeAllConnections();
-    if (server.listening)
+
+    if (server.listening) {
       await new Promise((resolve) => {
         return server.close(resolve);
       });
+    }
   }
 };

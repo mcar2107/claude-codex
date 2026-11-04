@@ -113,7 +113,10 @@ const run = (
     ...options,
   });
 
-  if (result.error) throw result.error;
+  if (result.error) {
+    throw result.error;
+  }
+
   assert.equal(
     result.status,
     0,
@@ -124,7 +127,9 @@ const run = (
 };
 
 const killGroup = (pid: number | undefined, signal: NodeJS.Signals) => {
-  if (!pid) return;
+  if (!pid) {
+    return;
+  }
 
   try {
     process.kill(-pid, signal);
@@ -146,9 +151,14 @@ const start = (command: string, args: string[], env: NodeJS.ProcessEnv) => {
   });
   let output = '';
 
-  if (child.pid) groups.add(child.pid);
+  if (child.pid) {
+    groups.add(child.pid);
+  }
+
   child.once('exit', () => {
-    if (child.pid) groups.delete(child.pid);
+    if (child.pid) {
+      groups.delete(child.pid);
+    }
   });
 
   child.stdout.on('data', (chunk) => {
@@ -191,16 +201,20 @@ const waitFor = async (check: () => boolean, message: string, watched: Started[]
     /**
      * Код 0 — тоже ранний выход, а не «кода нет»: `||` подменил бы его сигналом.
      */
-    if (exited)
+    if (exited) {
       throw new Error(
         `${message}: a process exited early (${exited.child.exitCode ?? exited.child.signalCode})\n${exited.output()}`
       );
-    if (Date.now() > deadline)
+    }
+
+    if (Date.now() > deadline) {
       throw new Error(
         watched.reduce((text, { output }) => {
           return `${text}\n${output()}`;
         }, message)
       );
+    }
+
     await delay(POLL_INTERVAL_MS);
   }
 };
@@ -223,8 +237,9 @@ const finish = async ({ child, done }: Started, label: string) => {
   try {
     const result = await done;
 
-    if (isTimedOut)
+    if (isTimedOut) {
       throw new Error(`${label} timed out after ${RUN_TIMEOUT_MS} ms\n${result.output}`);
+    }
 
     return result;
   } finally {
@@ -295,7 +310,10 @@ const exercise = async (cli: string, isStandalone: boolean) => {
   /**
    * Для standalone-теста в этом PATH нет ни Node, ни Bun.
    */
-  if (isStandalone) assert.deepEqual(fs.readdirSync(clientBin), ['claude']);
+  if (isStandalone) {
+    assert.deepEqual(fs.readdirSync(clientBin), ['claude']);
+  }
+
   assert(run(cli, ['--version'], { env }).includes(packageJson.version));
   run(cli, ['settings', 'set', '--model', 'gpt-6.1-sol', '--effort', 'high'], { env });
   const one = path.join(state, 'one');
@@ -368,12 +386,16 @@ const exercise = async (cli: string, isStandalone: boolean) => {
  * Ctrl-C или SIGTERM тестового прогона: мосты в своих группах сигнал терминала не получат —
  * снимаем их сами.
  */
-for (const name of ['SIGINT', 'SIGTERM'] as const)
+for (const name of ['SIGINT', 'SIGTERM'] as const) {
   process.once(name, () => {
-    for (const pid of groups) killGroup(pid, 'SIGKILL');
+    for (const pid of groups) {
+      killGroup(pid, 'SIGKILL');
+    }
+
     fs.rmSync(temp, { recursive: true, force: true });
     process.exit(130);
   });
+}
 
 try {
   const native = path.join(
@@ -386,12 +408,16 @@ try {
   /**
    * Свежесть проверяется до пересборки бандла: `dist/` ниже — не вход standalone-сборки.
    */
-  if (!fs.existsSync(native))
+  if (!fs.existsSync(native)) {
     throw new Error('Native standalone not built. Run bun run build:standalone first.');
-  if (fs.statSync(native).mtimeMs < newestInput())
+  }
+
+  if (fs.statSync(native).mtimeMs < newestInput()) {
     throw new Error(
       'Native standalone is older than its sources. Run bun run build:standalone first.'
     );
+  }
+
   run(process.execPath, [path.join(root, 'scripts/build.ts')]);
   await exercise(path.join(root, 'dist/cli.js'), false);
   console.log(

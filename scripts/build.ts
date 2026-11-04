@@ -44,10 +44,11 @@ export const plugin: BunPlugin = {
         return fs.existsSync(candidate);
       });
 
-      if (!resolved)
+      if (!resolved) {
         throw new Error(
           `Cannot resolve ${args.path} from ${args.importer}: no ${file}.ts or ${file}/index.ts`
         );
+      }
 
       return { path: resolved };
     });
@@ -97,7 +98,10 @@ export const build = async () => {
     throw: true,
   });
 
-  if (!result.metafile) throw new Error('Bun.build returned no metafile');
+  if (!result.metafile) {
+    throw new Error('Bun.build returned no metafile');
+  }
+
   const licenseCount = writeLicenses(result.metafile, root);
 
   console.log(`Collected license texts for ${licenseCount} bundled dependencies.`);
@@ -109,4 +113,6 @@ export const build = async () => {
   console.log('Built dist/cli.js (CCR source adapter, embedded tiktoken WASM).');
 };
 
-if (import.meta.main) await build();
+if (import.meta.main) {
+  await build();
+}

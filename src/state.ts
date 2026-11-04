@@ -56,9 +56,13 @@ export const isModelId = (value: unknown): value is string => {
 };
 
 export const effortsFor = (model: string): string[] => {
-  if (/^gpt-(6|5\.6)(?:[.-]|$)/.test(model))
+  if (/^gpt-(6|5\.6)(?:[.-]|$)/.test(model)) {
     return ['low', 'medium', 'high', 'xhigh', 'max'];
-  if (model === 'gpt-5.5') return ['low', 'medium', 'high', 'xhigh'];
+  }
+
+  if (model === 'gpt-5.5') {
+    return ['low', 'medium', 'high', 'xhigh'];
+  }
 
   return ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'];
 };
@@ -72,7 +76,9 @@ export const fitEffort = (model: string, effort: unknown): string | undefined =>
   const supported = effortsFor(model);
   const rank = typeof effort === 'string' ? EFFORT_ORDER.indexOf(effort) : -1;
 
-  if (rank < 0) return undefined;
+  if (rank < 0) {
+    return undefined;
+  }
 
   return EFFORT_ORDER.slice(0, rank + 1)
     .reverse()
@@ -106,9 +112,16 @@ const validate = (value: SettingsInput): Settings => {
   const model = raw.startsWith(CLIENT_PREFIX) ? raw.slice(CLIENT_PREFIX.length) : raw;
   const { reasoningEffort } = value;
 
-  if (!isModelId(model)) throw new Error('Expected a GPT model ID, such as gpt-6.1-sol');
-  if (typeof reasoningEffort !== 'string' || !effortsFor(model).includes(reasoningEffort))
+  if (!isModelId(model)) {
+    throw new Error('Expected a GPT model ID, such as gpt-6.1-sol');
+  }
+
+  if (
+    typeof reasoningEffort !== 'string' ||
+    !effortsFor(model).includes(reasoningEffort)
+  ) {
     throw new Error(`${model}: supported effort levels: ${effortsFor(model).join(', ')}`);
+  }
 
   return { model, reasoningEffort };
 };
@@ -174,7 +187,9 @@ const readJsonStrict = (file: string, hint: string): Record<string, unknown> => 
     throw new Error(`Cannot read ${file}: ${hint}`, { cause: error });
   }
 
-  if (!isRecord(parsed)) throw new Error(`Cannot read ${file}: ${hint}`);
+  if (!isRecord(parsed)) {
+    throw new Error(`Cannot read ${file}: ${hint}`);
+  }
 
   return parsed;
 };
@@ -212,7 +227,10 @@ export const activeSettings = (
 export const readModelsCache = (): ModelsCache => {
   const cache = readJsonQuietly(MODELS_CACHE_FILE);
 
-  if (!isRecord(cache)) return { refreshedAt: '', models: [], contextWindows: {} };
+  if (!isRecord(cache)) {
+    return { refreshedAt: '', models: [], contextWindows: {} };
+  }
+
   const discovered: unknown[] = Array.isArray(cache.models) ? cache.models : [];
   const windows: [string, unknown][] = isRecord(cache.contextWindows)
     ? Object.entries(cache.contextWindows)
@@ -222,8 +240,14 @@ export const readModelsCache = (): ModelsCache => {
     refreshedAt: typeof cache.refreshedAt === 'string' ? cache.refreshedAt : '',
     models: discovered.filter(isModelId),
     contextWindows: windows.reduce<Record<string, number>>((result, [id, size]) => {
-      if (isModelId(id) && typeof size === 'number' && Number.isInteger(size) && size > 0)
+      if (
+        isModelId(id) &&
+        typeof size === 'number' &&
+        Number.isInteger(size) &&
+        size > 0
+      ) {
         result[id] = size;
+      }
 
       return result;
     }, {}),
@@ -231,13 +255,16 @@ export const readModelsCache = (): ModelsCache => {
 };
 
 export const requireAuth = (): AuthFile => {
-  if (!fs.existsSync(AUTH_FILE))
+  if (!fs.existsSync(AUTH_FILE)) {
     throw new Error('Not authenticated. Run: claude-codex auth login');
+  }
+
   const auth = readJsonStrict(AUTH_FILE, 'run: claude-codex auth login');
   const { access_token: accessToken } = auth;
 
-  if (typeof accessToken !== 'string' || !accessToken)
+  if (typeof accessToken !== 'string' || !accessToken) {
     throw new Error('OAuth access token missing. Run: claude-codex auth login');
+  }
 
   /**
    * Обязательное поле проверено выше; остальные необязательны и читаются с проверкой типа.

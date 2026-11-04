@@ -55,7 +55,9 @@ const help = () => {
 const doctor = async (args: string[]) => {
   const { overrides, rest } = parseOverrides(args);
 
-  if (rest.length) throw new Error('doctor accepts only --model and --effort');
+  if (rest.length) {
+    throw new Error('doctor accepts only --model and --effort');
+  }
 
   return withRouter(overrides, async ({ base, key, active, signal }) => {
     console.log(
@@ -79,17 +81,23 @@ const doctor = async (args: string[]) => {
     });
     const result = await readJson(response);
 
-    if (!response.ok || !isDoctorResult(result) || result.error)
+    if (!response.ok || !isDoctorResult(result) || result.error) {
       throw new Error(
         `Upstream check failed (HTTP ${response.status}): ${(isDoctorResult(result) && result.error?.type) || 'provider_error'}`
       );
+    }
+
     const content = Array.isArray(result.content) ? result.content : [];
     const answer = content.reduce((text: string, item: ContentBlock) => {
       return item.type === 'text' ? text + (item.text || '') : text;
     }, '');
 
     console.log(`Returned model: ${result.model || '(not reported)'}\nAnswer: ${answer}`);
-    if (answer.trim() !== 'ok') throw new Error('Unexpected doctor response');
+
+    if (answer.trim() !== 'ok') {
+      throw new Error('Unexpected doctor response');
+    }
+
     console.log('PASS');
 
     return 0;
@@ -121,17 +129,22 @@ const launch = (args: string[]) => {
     console.error(
       `${active.model} ${active.reasoningEffort} via Codex OAuth. Switch with /model and /effort; claude-codex settings are defaults for new sessions.`
     );
-    for (const name of FOREIGN_CLIENT_ENV) delete env[name];
+
+    for (const name of FOREIGN_CLIENT_ENV) {
+      delete env[name];
+    }
+
     env.ANTHROPIC_BASE_URL = base;
     env.ANTHROPIC_AUTH_TOKEN = key;
     const { isClientModel, prepareClient, restoreUserModel, snapshotUserModel } =
       await import('./client');
     const snapshot = snapshotUserModel();
 
-    if (snapshot?.hasModel && isClientModel(snapshot.model))
+    if (snapshot?.hasModel && isClientModel(snapshot.model)) {
       console.error(
         `Warning: "model" in ${snapshot.file} is ${snapshot.model}; plain claude will start with a Codex model. Remove it or pick a Claude model with /model.`
       );
+    }
 
     try {
       return await spawnClient(
@@ -146,7 +159,9 @@ const launch = (args: string[]) => {
       try {
         const restored = restoreUserModel(snapshot);
 
-        if (restored) console.error(restored);
+        if (restored) {
+          console.error(restored);
+        }
       } catch (error) {
         console.error(
           `Warning: could not restore "model" in ${snapshot?.file}: ${error instanceof Error ? error.message : error}`
