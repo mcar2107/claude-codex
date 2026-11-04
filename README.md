@@ -7,9 +7,9 @@ This package supplies a private local transport to Codex; it does not install,
 replace or redistribute Claude Code.
 
 **Status: local distribution candidate, not a public release.** The package is
-`private`, version `0.1.0-dev.0`, with `UNLICENSED` original wrapper code until a
-project license is selected. Registry name availability, scope, repository,
-release account and public CLI naming have not been finalized. Nothing here
+`private`, version `0.1.0-dev.0`; the original wrapper code is MIT-licensed.
+Registry name availability, scope, release account and public CLI naming have
+not been finalized. Nothing here
 promises account access to any model or approval by Anthropic/OpenAI. Check the
 service's current account, subscription and usage terms before using the bridge.
 
@@ -245,9 +245,9 @@ to permanently erase local state. Uninstalling is not service-side token revocat
 
 ## Licenses
 
-See `LICENSE`, `THIRD_PARTY_NOTICES.md`, generated `THIRD_PARTY_LICENSES.txt`
-and `vendor/ccr/LICENSE`. CCR's MIT notice is retained; code-level license
-comments stay inline in `dist/cli.js`.
+The wrapper's own code is released under the MIT License (`LICENSE`).
+Third-party components keep their own licenses: see `THIRD_PARTY_NOTICES.md`,
+generated `THIRD_PARTY_LICENSES.txt` and `vendor/ccr/LICENSE`. CCR's MIT notice
+is retained; code-level license comments stay inline in `dist/cli.js`.
 The standalone directory additionally contains exact-version Bun notices.
-Select the wrapper's own license and review redistribution requirements before
-public release; this local candidate deliberately does not guess that decision.
+Review redistribution requirements before publishing release binaries.

@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "description": "Claude Code to Codex OAuth bridge with isolated sessions and live model settings",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "bin": {
     "claude-codex": "dist/cli.js"
   },
