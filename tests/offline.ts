@@ -58,6 +58,21 @@ const quietly = <T>(action: () => T): T => {
 };
 
 /**
+ * `quietly` для асинхронной команды: вывод глушится до завершения промиса, а не до его создания.
+ */
+const quietlyAsync = async <T>(action: () => Promise<T>): Promise<T> => {
+  const { log } = console;
+
+  console.log = () => {};
+
+  try {
+    return await action();
+  } finally {
+    console.log = log;
+  }
+};
+
+/**
  * Код ошибки подключения к порту: после остановки сервера ожидается `ECONNREFUSED`.
  */
 const connectError = (port: number) => {
@@ -948,6 +963,125 @@ try {
   assert.equal(JSON.parse(fs.readFileSync(dotfile, 'utf8')).model, 'opus');
   console.log(
     'PASS: a Codex model saved by /model is restored in user settings on exit, through a symlink; foreign edits are kept.'
+  );
+  /**
+   * Релиз — архив со скриптом вместо бинарника: `--version` печатает версию, которую ему задали.
+   */
+  const { installRelease } = await import('../src/update');
+  const { version: currentVersion } = (await import('../package.json')).default;
+  const asset = 'claude-codex-test-x64';
+  const installDir = path.join(fixture, 'bin');
+  const target = path.join(installDir, 'claude-codex');
+  const shareDir = path.join(fixture, 'share');
+
+  const releaseArchive = async (reported: string) => {
+    return new Bun.Archive(
+      {
+        [`${asset}/claude-codex`]: `#!/bin/sh\necho ${reported}\n`,
+        [`${asset}/LICENSE`]: `license ${reported}`,
+      },
+      { compress: 'gzip' }
+    ).bytes();
+  };
+
+  const serveRelease = (archive: Uint8Array, sums: string) => {
+    const requested: string[] = [];
+
+    mockFetch(async (url) => {
+      const href = String(url);
+
+      requested.push(href);
+
+      if (href.endsWith('/releases/latest')) {
+        return Response.json({ tag_name: 'v9.9.9' });
+      }
+
+      if (href.endsWith(`/v9.9.9/${asset}.tar.gz`)) {
+        /**
+         * Копия — `Uint8Array<ArrayBuffer>`: `bytes()` архива типизирован `ArrayBufferLike`, а его
+         * `BodyInit` не принимает.
+         */
+        return new Response(archive.slice());
+      }
+
+      if (href.endsWith('/v9.9.9/SHA256SUMS')) {
+        return new Response(sums);
+      }
+
+      return new Response('not found', { status: 404 });
+    });
+
+    return requested;
+  };
+
+  const sha256 = (bytes: Uint8Array) => {
+    return new Bun.CryptoHasher('sha256').update(bytes).digest('hex');
+  };
+
+  const goodArchive = await releaseArchive('9.9.9');
+  const goodSums = `${sha256(goodArchive)}  ${asset}.tar.gz\n`;
+
+  fs.mkdirSync(installDir);
+  fs.mkdirSync(shareDir);
+  fs.writeFileSync(target, 'old binary');
+
+  try {
+    serveRelease(goodArchive, `${'0'.repeat(64)}  ${asset}.tar.gz\n`);
+    await assert.rejects(
+      quietlyAsync(() => {
+        return installRelease({ target, asset, shareDir });
+      }),
+      /Checksum mismatch/
+    );
+    assert.equal(fs.readFileSync(target, 'utf8'), 'old binary');
+    const wrongArchive = await releaseArchive('1.2.3');
+
+    serveRelease(wrongArchive, `${sha256(wrongArchive)}  ${asset}.tar.gz\n`);
+    await assert.rejects(
+      quietlyAsync(() => {
+        return installRelease({ target, asset, shareDir });
+      }),
+      /does not run as 9\.9\.9 \(reported 1\.2\.3\)/
+    );
+    assert.equal(fs.readFileSync(target, 'utf8'), 'old binary');
+    assert.deepEqual(
+      fs.readdirSync(installDir),
+      ['claude-codex'],
+      'no temporary file left'
+    );
+    serveRelease(goodArchive, goodSums);
+    assert.equal(
+      await quietlyAsync(() => {
+        return installRelease({ target, asset, shareDir });
+      }),
+      0
+    );
+    assert.equal(fs.readFileSync(target, 'utf8'), '#!/bin/sh\necho 9.9.9\n');
+    assert.equal(fs.statSync(target).mode & 0o777, 0o755);
+    assert.equal(
+      fs.readFileSync(path.join(shareDir, 'LICENSE'), 'utf8'),
+      'license 9.9.9'
+    );
+    assert(
+      !fs.existsSync(path.join(shareDir, 'claude-codex')),
+      'the binary stays out of share'
+    );
+    const sameVersion = serveRelease(goodArchive, goodSums);
+
+    await quietlyAsync(() => {
+      return installRelease({ tag: `v${currentVersion}`, target, asset, shareDir });
+    });
+    assert.deepEqual(sameVersion, [], 'the current version is not downloaded');
+    await assert.rejects(
+      installRelease({ tag: 'latest', target, asset, shareDir }),
+      /Expected a release tag/
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  console.log(
+    'PASS: update installs the latest release only after SHA256 and --version checks; failures keep the old binary.'
   );
 } finally {
   fs.rmSync(fixture, { recursive: true, force: true });

@@ -11,7 +11,7 @@ paths:
 
 | Команда | Что | Как |
 |---|---|---|
-| `bun run test` | офлайн-тесты нового CLI: настройки, транспорт CCR → mock Codex, SSE, отмена, лимиты, PKCE OAuth, refresh, подготовка клиента, statusline, setup --remove | `scripts/test.ts` собирает `tests/offline.ts` через `Bun.build` с плагином `scripts/build.ts` и запускает бандл |
+| `bun run test` | офлайн-тесты нового CLI: настройки, транспорт CCR → mock Codex, SSE, отмена, лимиты, PKCE OAuth, refresh, подготовка клиента, statusline, setup --remove, update | `scripts/test.ts` собирает `tests/offline.ts` через `Bun.build` с плагином `scripts/build.ts` и запускает бандл |
 | `bun scripts/test.ts --standalone` | те же тесты скомпилированным бинарником без Node/Bun в `PATH` | `bun build --compile` |
 | `bun run test:e2e` | `dist/cli.js` и перенесённый standalone с фейковым клиентом Claude: свой роутер, WASM, код выхода, параллельные сессии, уборка | `scripts/test-e2e.ts`; нужен `bun run build:standalone` |
 
