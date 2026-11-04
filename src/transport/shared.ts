@@ -1,7 +1,7 @@
 import os from 'node:os';
 import path from 'node:path';
 
-import state from '../state.cjs';
+import * as state from '../state';
 export * from '../../vendor/ccr/shared/src/codex-auth';
 export * from '../../vendor/ccr/shared/src/model-alias';
 /**

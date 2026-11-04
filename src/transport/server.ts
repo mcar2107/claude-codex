@@ -10,7 +10,7 @@ import { TokenizerService } from '../../vendor/ccr/core/src/services/tokenizer';
 import { TransformerService } from '../../vendor/ccr/core/src/services/transformer';
 import type { UnifiedChatRequest } from '../../vendor/ccr/core/src/types/llm';
 import { calculateTokenCount } from '../../vendor/ccr/core/src/utils/router';
-import state from '../state.cjs';
+import * as state from '../state';
 
 import type { CountTokensRoute, CreateRouterOptions } from './server.types';
 

@@ -1,21 +1,50 @@
-const fs = require('node:fs');
-const path = require('node:path');
-const state = require('./state.cjs');
-const { parseOverrides } = require('./session.cjs');
+import fs from 'node:fs';
+import path from 'node:path';
 
-function show() {
-  const settings = state.readSettings();
+import { parseOverrides } from './session';
+import * as state from './state';
+import type { Settings } from './state.types';
+
+const PRESETS: Record<string, Settings> = {
+  sol: state.defaults,
+  balanced: { model: 'gpt-6.1-sol', reasoningEffort: 'high' },
+  fast: { model: 'gpt-6-luna', reasoningEffort: 'low' },
+  max: { model: 'gpt-6-astra', reasoningEffort: 'max' },
+};
+
+const show = () => {
+  const { model, reasoningEffort } = state.readSettings();
 
   console.log(
-    `model=${settings.model}\nreasoningEffort=${settings.reasoningEffort}\nsettingsFile=${state.settingsFile}`
+    `model=${model}\nreasoningEffort=${reasoningEffort}\nsettingsFile=${state.settingsFile}`
   );
-}
+};
 
-function settings(args) {
+/**
+ * Элементы ответа discovery: у одних версий API ID в `slug`, у других — в `id`.
+ */
+const modelIds = (items: unknown[]) => {
+  return [
+    ...new Set(
+      items.reduce<string[]>((ids, item) => {
+        const id =
+          typeof item === 'object' && item !== null
+            ? Reflect.get(item, 'slug') || Reflect.get(item, 'id')
+            : undefined;
+
+        if (typeof id === 'string' && /^gpt-[a-z0-9][a-z0-9.-]*$/.test(id)) ids.push(id);
+
+        return ids;
+      }, [])
+    ),
+  ];
+};
+
+export const settings = (args: string[]) => {
   const [command = 'show', ...rest] = args;
 
   if (['show', 'status'].includes(command) && !rest.length) return show();
-  let next;
+  let next: Settings | undefined;
 
   if (command === 'set') {
     const parsed = parseOverrides(rest);
@@ -25,14 +54,7 @@ function settings(args) {
     next = { ...state.readSettings(), ...parsed.overrides };
   } else if (command === 'reset' && !rest.length) next = state.defaults;
   else if (command === 'preset' && rest.length === 1) {
-    const presets = {
-      sol: state.defaults,
-      balanced: { model: 'gpt-6.1-sol', reasoningEffort: 'high' },
-      fast: { model: 'gpt-6-luna', reasoningEffort: 'low' },
-      max: { model: 'gpt-6-astra', reasoningEffort: 'max' },
-    };
-
-    next = presets[rest[0]];
+    next = PRESETS[rest[0]];
     if (!next) throw new Error('Unknown preset. Choose sol|balanced|fast|max');
   } else throw new Error('Usage: claude-codex settings show|set|reset|preset');
   state.saveSettings(next);
@@ -40,18 +62,20 @@ function settings(args) {
   console.log(
     'Applies on the next request, including open sessions. Session overrides take precedence.'
   );
-}
+};
 
-async function models(args) {
+export const models = async (args: string[]) => {
   const cache = path.join(state.runtime, 'models.json');
 
   if (args.length && (args.length !== 1 || args[0] !== 'refresh'))
     throw new Error('Usage: claude-codex models [refresh]');
 
   if (args[0] === 'refresh') {
-    const tokens = await require('./auth.cjs').validTokens();
-    const version = require('../vendor/ccr/shared/src/codex-auth.ts').CODEX_CLI_VERSION;
-    const headers = {
+    const { validTokens } = await import('./auth');
+    const { CODEX_CLI_VERSION: version } =
+      await import('../vendor/ccr/shared/src/codex-auth');
+    const tokens = await validTokens();
+    const headers: Record<string, string> = {
       Authorization: `Bearer ${tokens.access_token}`,
       'User-Agent': `codex_cli_rs/${version}`,
       originator: 'codex_cli_rs',
@@ -79,20 +103,11 @@ async function models(args) {
       throw new Error(
         'Unexpected model discovery response; saved settings and cache preserved'
       );
-    const ids = [
-      ...new Set(
-        items.reduce((acc, item) => {
-          const id = item.slug || item.id;
 
-          if (typeof id === 'string' && /^gpt-[a-z0-9][a-z0-9.-]*$/.test(id))
-            acc.push(id);
-
-          return acc;
-        }, [])
-      ),
-    ];
-
-    state.writeJson(cache, { refreshedAt: new Date().toISOString(), models: ids });
+    state.writeJson(cache, {
+      refreshedAt: new Date().toISOString(),
+      models: modelIds(items),
+    });
   }
 
   if (fs.existsSync(cache)) {
@@ -107,6 +122,4 @@ async function models(args) {
   console.log('Configured candidates (not a promise of account access):');
   for (const model of [...new Set([...state.models, state.readSettings().model])])
     console.log(`${model}: ${state.effortsFor(model).join(', ')}`);
-}
-
-module.exports = { settings, models };
+};

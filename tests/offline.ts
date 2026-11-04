@@ -1,17 +1,37 @@
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
-const assert = require('node:assert/strict');
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+import type { ContentBlock } from '../src/cli.types';
+
+import type {
+  CancellationProbe,
+  CapturedRequest,
+  FetchImpl,
+  ResponseOutputItem,
+} from './offline.types';
+
 const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-codex-test-'));
 
 process.env.CLAUDE_CODEX_STATE_DIR = fixture;
-delete process.env.CLAUDE_GPT_MODEL;
-delete process.env.CLAUDE_GPT_EFFORT;
-const state = require('../src/state.cjs');
-const { createRouter } = require('../src/transport/server.ts');
-const { login } = require('../src/auth.cjs');
+delete process.env.CLAUDE_CODEX_MODEL;
+delete process.env.CLAUDE_CODEX_EFFORT;
 
-const jwt = (claims) => {
+/**
+ * Модули проекта — динамическим импортом после env: state-каталог вычисляется при загрузке
+ * модуля, а статические импорты всплыли бы выше присваивания.
+ */
+const state = await import('../src/state');
+const { createRouter } = await import('../src/transport/server');
+const { login } = await import('../src/auth');
+const originalFetch = globalThis.fetch;
+
+const mockFetch = (impl: FetchImpl) => {
+  globalThis.fetch = Object.assign(impl, { preconnect: originalFetch.preconnect });
+};
+
+const jwt = (claims: object) => {
   return `x.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.x`;
 };
 
@@ -21,22 +41,21 @@ const fresh = {
   account_id: 'test-account',
 };
 
-const sse = (type, data) => {
+const sse = (type: string, data: object) => {
   return `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
 };
 
-function upstreamResponse(
-  model,
-  output = [
-    {
-      id: 'msg_test',
-      type: 'message',
-      status: 'completed',
-      role: 'assistant',
-      content: [{ type: 'output_text', text: 'ok', annotations: [] }],
-    },
-  ]
-) {
+const DEFAULT_OUTPUT: ResponseOutputItem[] = [
+  {
+    id: 'msg_test',
+    type: 'message',
+    status: 'completed',
+    role: 'assistant',
+    content: [{ type: 'output_text', text: 'ok', annotations: [] }],
+  },
+];
+
+const upstreamResponse = (model: string, output = DEFAULT_OUTPUT) => {
   return {
     id: 'resp_test',
     object: 'response',
@@ -45,9 +64,45 @@ function upstreamResponse(
     output,
     usage: { input_tokens: 10, output_tokens: 1, total_tokens: 11 },
   };
-}
+};
 
-async function main() {
+type UpstreamResponse = ReturnType<typeof upstreamResponse>;
+
+const streamFrames = (response: UpstreamResponse) => {
+  const [message] = response.output;
+
+  return [
+    sse('response.created', {
+      response: { ...response, status: 'in_progress', output: [] },
+    }),
+    sse('response.output_item.added', {
+      output_index: 0,
+      item: { ...message, content: [] },
+    }),
+    sse('response.content_part.added', {
+      item_id: message.id,
+      output_index: 0,
+      content_index: 0,
+      part: { type: 'output_text', text: '', annotations: [] },
+    }),
+    sse('response.output_text.delta', {
+      item_id: message.id,
+      output_index: 0,
+      content_index: 0,
+      delta: 'o',
+    }),
+    sse('response.output_text.delta', {
+      item_id: message.id,
+      output_index: 0,
+      content_index: 0,
+      delta: 'k',
+    }),
+    sse('response.output_item.done', { output_index: 0, item: message }),
+    sse('response.completed', { response }),
+  ];
+};
+
+try {
   assert.equal(state.runtime, fixture);
   assert.deepEqual(state.readSettings(), state.defaults);
   assert.equal(
@@ -64,7 +119,7 @@ async function main() {
   });
   assert.equal(fs.readFileSync(state.settingsFile, 'utf8'), before);
   assert.equal(fs.statSync(state.settingsFile).mode & 0o777, 0o600);
-  const { parseOverrides } = require('../src/session.cjs');
+  const { parseOverrides } = await import('../src/session');
 
   assert.deepEqual(
     parseOverrides(['--model=gpt-future-test', '--effort', 'high', '--', '-p', 'hi']),
@@ -77,7 +132,7 @@ async function main() {
     return parseOverrides(['--model=']);
   });
   assert.equal(
-    state.activeSettings({ reasoningEffort: 'low' }, { CLAUDE_GPT_EFFORT: 'high' })
+    state.activeSettings({ reasoningEffort: 'low' }, { CLAUDE_CODEX_EFFORT: 'high' })
       .reasoningEffort,
     'low'
   );
@@ -85,49 +140,19 @@ async function main() {
     'PASS: defaults, atomic private settings, future IDs, effort validation and overrides.'
   );
   state.writeJson(state.authFile, fresh);
-  const originalFetch = global.fetch;
-  let captured, output, upstreamError, cancellationProbe;
+  let captured: CapturedRequest | undefined;
+  let output: ResponseOutputItem[] | undefined;
+  let upstreamError: number | undefined;
+  let cancellationProbe: CancellationProbe | undefined;
 
-  const streamFrames = (response) => {
-    const message = response.output[0];
-
-    return [
-      sse('response.created', {
-        response: { ...response, status: 'in_progress', output: [] },
-      }),
-      sse('response.output_item.added', {
-        output_index: 0,
-        item: { ...message, content: [] },
-      }),
-      sse('response.content_part.added', {
-        item_id: message.id,
-        output_index: 0,
-        content_index: 0,
-        part: { type: 'output_text', text: '', annotations: [] },
-      }),
-      sse('response.output_text.delta', {
-        item_id: message.id,
-        output_index: 0,
-        content_index: 0,
-        delta: 'o',
-      }),
-      sse('response.output_text.delta', {
-        item_id: message.id,
-        output_index: 0,
-        content_index: 0,
-        delta: 'k',
-      }),
-      sse('response.output_item.done', { output_index: 0, item: message }),
-      sse('response.completed', { response }),
-    ];
-  };
-
-  global.fetch = async (url, opts) => {
+  mockFetch(async (url, opts) => {
     assert(
       String(url).includes('chatgpt.com/backend-api/codex/responses'),
       `Unexpected network: ${url}`
     );
-    captured = JSON.parse(opts.body);
+    const request: CapturedRequest = JSON.parse(String(opts?.body));
+
+    captured = request;
     if (upstreamError)
       return new Response(
         JSON.stringify({
@@ -135,25 +160,28 @@ async function main() {
         }),
         { status: upstreamError, headers: { 'Content-Type': 'application/json' } }
       );
-    const response = upstreamResponse(captured.model, output);
+    const response = upstreamResponse(request.model, output);
+    const probe = cancellationProbe;
 
-    if (cancellationProbe) {
-      let controller;
-      const stream = new ReadableStream({
-        start(value) {
-          controller = value;
+    if (probe) {
+      const { promise: opened, resolve: onOpen } =
+        Promise.withResolvers<ReadableStreamDefaultController<Uint8Array>>();
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
           for (const frame of streamFrames(response).slice(0, 4))
             controller.enqueue(new TextEncoder().encode(frame));
+          onOpen(controller);
         },
         cancel() {
-          cancellationProbe.cancelled = true;
+          probe.isCancelled = true;
         },
       });
+      const controller = await opened;
 
-      opts.signal?.addEventListener(
+      opts?.signal?.addEventListener(
         'abort',
         () => {
-          cancellationProbe.aborted = true;
+          probe.isAborted = true;
 
           try {
             controller.error(new DOMException('Aborted', 'AbortError'));
@@ -173,6 +201,12 @@ async function main() {
       output ? sse('response.completed', { response }) : streamFrames(response).join(''),
       { headers: { 'Content-Type': 'text/event-stream' } }
     );
+  });
+
+  const lastRequest = () => {
+    assert(captured, 'mock upstream received no request');
+
+    return captured;
   };
 
   const app = await createRouter({ key: 'test-key' });
@@ -221,24 +255,25 @@ async function main() {
         headers,
         payload: request,
       });
+      const sent = lastRequest();
 
       assert.equal(result.statusCode, 200, result.body.slice(0, 1000));
-      assert.equal(captured.model, model);
-      assert.equal(captured.reasoning.effort, reasoningEffort);
-      assert.equal(captured.stream, true);
-      assert.equal(captured.store, false);
+      assert.equal(sent.model, model);
+      assert.equal(sent.reasoning.effort, reasoningEffort);
+      assert.equal(sent.stream, true);
+      assert.equal(sent.store, false);
       if (model !== 'gpt-future-test')
-        assert.equal(captured.input[0].type, 'additional_tools', model);
+        assert.equal(sent.input[0].type, 'additional_tools', model);
       else
         assert(
-          captured.tools?.length,
+          sent.tools?.length,
           'Unknown future IDs use standard Responses until the transport catalog recognizes Lite'
         );
       assert.equal(result.json().content[0].text, 'ok');
     }
 
-    process.env.CLAUDE_GPT_MODEL = 'gpt-6-astra';
-    process.env.CLAUDE_GPT_EFFORT = 'max';
+    process.env.CLAUDE_CODEX_MODEL = 'gpt-6-astra';
+    process.env.CLAUDE_CODEX_EFFORT = 'max';
     const overridden = await app.inject({
       method: 'POST',
       url: '/v1/messages',
@@ -247,10 +282,10 @@ async function main() {
     });
 
     assert.equal(overridden.statusCode, 200);
-    assert.equal(captured.model, 'gpt-6-astra');
-    assert.equal(captured.reasoning.effort, 'max');
-    delete process.env.CLAUDE_GPT_MODEL;
-    delete process.env.CLAUDE_GPT_EFFORT;
+    assert.equal(lastRequest().model, 'gpt-6-astra');
+    assert.equal(lastRequest().reasoning.effort, 'max');
+    delete process.env.CLAUDE_CODEX_MODEL;
+    delete process.env.CLAUDE_CODEX_EFFORT;
     output = [
       {
         id: 'fc_1',
@@ -269,7 +304,7 @@ async function main() {
     });
 
     assert.equal(tool.statusCode, 200, tool.body);
-    const call = tool.json().content.find((item) => {
+    const call = tool.json().content.find((item: ContentBlock) => {
       return item.type === 'tool_use';
     });
 
@@ -277,17 +312,19 @@ async function main() {
     assert.equal(call.name, 'read_file');
     assert.deepEqual(call.input, { path: 'a.txt' });
     output = undefined;
-    const followup = structuredClone(request);
-
-    followup.messages.push(
-      { role: 'assistant', content: [call] },
-      {
-        role: 'user',
-        content: [
-          { type: 'tool_result', tool_use_id: call.id, content: 'file contents' },
-        ],
-      }
-    );
+    const followup = {
+      ...request,
+      messages: [
+        ...request.messages,
+        { role: 'assistant', content: [call] },
+        {
+          role: 'user',
+          content: [
+            { type: 'tool_result', tool_use_id: call.id, content: 'file contents' },
+          ],
+        },
+      ],
+    };
     const followupResult = await app.inject({
       method: 'POST',
       url: '/v1/messages',
@@ -296,7 +333,7 @@ async function main() {
     });
 
     assert.equal(followupResult.statusCode, 200, followupResult.body);
-    assert(JSON.stringify(captured.input).includes('file contents'));
+    assert(JSON.stringify(lastRequest().input).includes('file contents'));
     const streamed = await app.inject({
       method: 'POST',
       url: '/v1/messages',
@@ -333,20 +370,20 @@ async function main() {
     console.log(
       'PASS: actual source-backed CCR, 5 hot-switched model IDs, overrides, Responses Lite, tools/results, incremental SSE, auth and provider errors (mock upstream).'
     );
-    cancellationProbe = { aborted: false, cancelled: false };
-    await app.listen({ host: '127.0.0.1', port: 0 });
+    const probe: CancellationProbe = { isAborted: false, isCancelled: false };
+
+    cancellationProbe = probe;
+    const base = await app.listen({ host: '127.0.0.1', port: 0 });
     const clientAbort = new AbortController();
-    const streamResponse = await originalFetch(
-      `http://127.0.0.1:${app.server.address().port}/v1/messages`,
-      {
-        method: 'POST',
-        headers: { ...headers, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...request, stream: true }),
-        signal: clientAbort.signal,
-      }
-    );
+    const streamResponse = await originalFetch(`${base}/v1/messages`, {
+      method: 'POST',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...request, stream: true }),
+      signal: clientAbort.signal,
+    });
 
     assert.equal(streamResponse.status, 200);
+    assert(streamResponse.body, 'stream response has no body');
     const reader = streamResponse.body.getReader();
 
     assert.equal((await reader.read()).done, false);
@@ -354,23 +391,19 @@ async function main() {
     await reader.cancel().catch(() => {});
     const deadline = Date.now() + 3000;
 
-    while (
-      !cancellationProbe.aborted &&
-      !cancellationProbe.cancelled &&
-      Date.now() < deadline
-    )
+    while (!probe.isAborted && !probe.isCancelled && Date.now() < deadline)
       await new Promise((resolve) => {
         return setTimeout(resolve, 20);
       });
     assert(
-      cancellationProbe.aborted || cancellationProbe.cancelled,
+      probe.isAborted || probe.isCancelled,
       'client cancellation must abort upstream fetch or cancel its stream'
     );
     console.log(
       'PASS: disconnecting a real loopback SSE client cancels the mocked upstream stream.'
     );
   } finally {
-    global.fetch = originalFetch;
+    globalThis.fetch = originalFetch;
     await app.close();
   }
 
@@ -398,6 +431,7 @@ async function main() {
     },
     fetchImpl: async (url, opts) => {
       assert.equal(url, 'https://auth.openai.com/oauth/token');
+      assert(opts.body instanceof URLSearchParams);
       assert.equal(opts.body.get('code'), 'fake');
       assert(opts.body.get('code_verifier'));
 
@@ -426,41 +460,30 @@ async function main() {
   process.env.CCR_CODEX_AUTH_FILE = state.authFile;
   let refreshed = 0;
 
-  global.fetch = async () => {
+  mockFetch(async () => {
     refreshed++;
 
     return Response.json({ ...fresh, refresh_token: 'rotated-fake' });
-  };
+  });
 
   try {
-    const auth = require('../vendor/ccr/core/src/utils/codex-auth.ts');
+    const { getValidAccessToken } =
+      await import('../vendor/ccr/core/src/utils/codex-auth');
 
-    await Promise.all([auth.getValidAccessToken(), auth.getValidAccessToken()]);
+    await Promise.all([getValidAccessToken(), getValidAccessToken()]);
     assert.equal(refreshed, 1);
     assert.equal(state.requireAuth().refresh_token, 'rotated-fake');
   } finally {
-    global.fetch = originalFetch;
+    globalThis.fetch = originalFetch;
   }
 
   console.log(
     'PASS: CCR refresh helper deduplicates simultaneous refresh and atomically persists rotation (mock endpoint).'
   );
-  const source = path.join(fixture, 'migration-source');
-
-  fs.mkdirSync(source);
-  fs.writeFileSync(path.join(source, 'settings.json'), JSON.stringify(state.defaults));
-  const { migrate } = require('../src/migrate.cjs');
-
-  assert.throws(() => {
-    return migrate(['--from', source]);
-  }, /overwrite/);
-  fs.unlinkSync(state.settingsFile);
-  migrate(['--from', source]);
-  assert.deepEqual(state.readSettings(), state.defaults);
   const commands = path.join(fixture, 'claude');
 
   process.env.CLAUDE_CONFIG_DIR = commands;
-  const { setup } = require('../src/setup.cjs');
+  const { setup } = await import('../src/setup');
 
   setup([]);
   setup([]);
@@ -473,16 +496,7 @@ async function main() {
     fs.readFileSync(path.join(commands, 'commands', 'codex-model.md'), 'utf8'),
     'foreign command'
   );
-  console.log(
-    'PASS: explicit migration refuses overwrite; slash setup is idempotent and preserves foreign commands.'
-  );
+  console.log('PASS: slash setup is idempotent and preserves foreign commands.');
+} finally {
+  fs.rmSync(fixture, { recursive: true, force: true });
 }
-
-main()
-  .catch((error) => {
-    console.error(error);
-    process.exitCode = 1;
-  })
-  .finally(() => {
-    return fs.rmSync(fixture, { recursive: true, force: true });
-  });

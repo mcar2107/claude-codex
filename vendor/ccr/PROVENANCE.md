@@ -13,7 +13,7 @@ minified source manipulation or symbol-name interception is used by the new CLI.
 
 ## Adapter rather than edits to upstream code
 
-`scripts/build.cjs` resolves these explicit source-level integration boundaries:
+`scripts/build.ts` resolves these explicit source-level integration boundaries:
 
 - `@caeliq/ccr-shared`: `src/transport/shared.ts`, which re-exports the original
   Codex/model-alias utilities and supplies the wrapper's state directory,
@@ -21,7 +21,7 @@ minified source manipulation or symbol-name interception is used by the new CLI.
 - `@/transformer`: `src/transport/registry.ts`, linking only the Anthropic,
   OpenAI, Responses and Codex transformers. Other providers, UI and CCR CLI
   are not part of the product interface.
-- `tiktoken`: `src/transport/tiktoken.cjs`, initializing the original bindings
+- `tiktoken`: `src/transport/tiktoken.ts`, initializing the original bindings
   with the exact dependency's WASM embedded in the JS bundle. There is no
   runtime asset search, download or dynamic package installation.
 - Router's token-count worker boundary: `src/transport/token-count.ts` uses
@@ -47,8 +47,6 @@ before moving the revision.
 
 ## Rebuild
 
-From the project checkout: `npm ci --ignore-scripts`, then `bun run build`.
-The npm artifact contains the resulting bundle and licenses, not the source
-checkout, development tools or private runtime state. The legacy published CCR
-package remains a pinned dev dependency only for the unchanged local regression
-checks; the new launcher never executes it.
+From the project checkout: `bun install`, then `bun run build`.
+The bundle (`dist/cli.js`) and standalone directories contain the build output and
+licenses, not the source checkout, development tools or private runtime state.

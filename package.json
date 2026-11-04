@@ -2,37 +2,26 @@
   "name": "claude-codex",
   "version": "0.1.0-dev.0",
   "private": true,
+  "type": "module",
   "description": "Claude Code to Codex OAuth bridge with isolated sessions and live model settings",
   "license": "UNLICENSED",
   "bin": {
-    "claude-codex": "dist/cli.cjs"
+    "claude-codex": "dist/cli.js"
   },
   "engines": {
-    "bun": ">=1.4.0",
-    "node": ">=22"
+    "bun": ">=1.4.0"
   },
   "os": [
     "darwin",
     "linux"
   ],
-  "files": [
-    "dist/cli.cjs",
-    "dist/cli.cjs.LEGAL.txt",
-    "README.md",
-    "LICENSE",
-    "THIRD_PARTY_NOTICES.md",
-    "vendor/ccr/LICENSE",
-    "vendor/ccr/PROVENANCE.md",
-    "THIRD_PARTY_LICENSES.txt"
-  ],
   "scripts": {
-    "build": "bun scripts/build.cjs",
-    "build:standalone": "bun scripts/standalone.cjs",
-    "test": "bun scripts/test.cjs",
-    "test:legacy": "node verify.cjs && bun verify-transport.cjs",
-    "test:package": "bun scripts/test-package.cjs",
+    "build": "bun scripts/build.ts",
+    "build:standalone": "bun scripts/standalone.ts",
+    "test": "bun scripts/test.ts",
+    "test:e2e": "bun scripts/test-e2e.ts",
     "typecheck": "tsc -p tsconfig.json",
-    "lint": "concurrently --kill-others-on-fail \"npm:lint:es\" \"npm:typecheck\" \"npm:lint:format\" \"npm:lint:knip\" \"npm:lint:sg\" \"npm:lint:agents\"",
+    "lint": "concurrently --kill-others-on-fail \"bun:lint:es\" \"bun:typecheck\" \"bun:lint:format\" \"bun:lint:knip\" \"bun:lint:sg\" \"bun:lint:agents\"",
     "lint:es": "eslint . --cache --cache-strategy=content",
     "lint:fix": "eslint . --fix",
     "lint:format": "prettier --check .",
@@ -40,22 +29,20 @@
     "lint:sg": "mise x -- ast-grep scan && mise x -- ast-grep test",
     "lint:agents": "mise x -- agnix --strict .",
     "lint:secrets": "mise x -- betterleaks git . --redact -v --no-banner",
-    "lint:deps": "mise x -- osv-scanner scan source --config=osv-scanner.toml -L package-lock.json",
+    "lint:deps": "mise x -- osv-scanner scan source --config=osv-scanner.toml -L bun.lock",
     "format": "prettier --write .",
-    "prepack": "bun scripts/build.cjs",
     "prepare": "husky"
   },
   "devDependencies": {
     "@anthropic-ai/sdk": "0.120.0",
-    "@caeliq/claude-code-router": "2.1.16",
     "@eslint/js": "10.0.1",
     "@fastify/cors": "11.3.1",
     "@fastify/rate-limit": "11.2.1",
     "@huggingface/tokenizers": "0.1.3",
+    "@types/bun": "1.4.4",
     "@types/node": "22.20.5",
     "concurrently": "10.0.6",
     "dotenv": "17.4.2",
-    "esbuild": "0.28.2",
     "eslint": "10.13.0",
     "eslint-config-prettier": "10.1.8",
     "eslint-plugin-jsdoc": "63.3.3",

@@ -1,24 +1,33 @@
-const fs = require('node:fs');
-const path = require('node:path');
-const crypto = require('node:crypto');
-const { spawn } = require('node:child_process');
-const state = require('./state.cjs');
+import { type ChildProcessByStdio, spawn } from 'node:child_process';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import type { Readable, Writable } from 'node:stream';
 
-const sleep = (ms) => {
+import type {
+  ParsedOverrides,
+  RouterMetadata,
+  RouterSession,
+  SpawnClientOptions,
+} from './session.types';
+import * as state from './state';
+import type { SettingsOverrides } from './state.types';
+
+const sleep = (ms: number) => {
   return new Promise((resolve) => {
     return setTimeout(resolve, ms);
   });
 };
 
-function selfCommand(args) {
-  const standalone = typeof Bun !== 'undefined' && Bun.main.startsWith('/$bunfs/');
+const selfCommand = (args: string[]) => {
+  const isStandalone = Bun.main.startsWith('/$bunfs/');
 
-  return [process.execPath, ...(standalone ? [] : [process.argv[1]]), ...args];
-}
+  return [process.execPath, ...(isStandalone ? [] : [process.argv[1]]), ...args];
+};
 
-function parseOverrides(args) {
-  const overrides = {},
-    rest = [];
+export const parseOverrides = (args: string[]): ParsedOverrides => {
+  const overrides: SettingsOverrides = {},
+    rest: string[] = [];
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -42,33 +51,36 @@ function parseOverrides(args) {
   }
 
   return { overrides, rest };
-}
+};
 
-async function internalRouter(session) {
+export const internalRouter = async (session: string | undefined) => {
   const key = process.env.CLAUDE_CODEX_SESSION_KEY;
 
   if (
     !session ||
-    !/^[a-f0-9]{64}$/.test(key || '') ||
+    !key ||
+    !/^[a-f0-9]{64}$/.test(key) ||
     !path.resolve(session).startsWith(state.runtime + path.sep)
   )
     throw new Error('Internal router requires a private session');
   /**
    * Ни учётные данные, ни локальный ключ сессии не печатаются и не попадают в метаданные.
    */
-  const { createRouter } = require('./transport/server.ts');
+  const { createRouter } = await import('./transport/server');
   const app = await createRouter({ key });
-
-  await app.listen({ host: '127.0.0.1', port: 0 });
-  const base = `http://127.0.0.1:${app.server.address().port}`;
-  const metadata = { pid: process.pid, base, startedAt: new Date().toISOString() };
+  const base = await app.listen({ host: '127.0.0.1', port: 0 });
+  const metadata: RouterMetadata = {
+    pid: process.pid,
+    base,
+    startedAt: new Date().toISOString(),
+  };
 
   state.writeJson(path.join(session, 'health.json'), metadata);
-  let stopping = false;
+  let isStopping = false;
 
   const stop = async () => {
-    if (stopping) return;
-    stopping = true;
+    if (isStopping) return;
+    isStopping = true;
     const force = setTimeout(() => {
       return process.exit(1);
     }, 2000);
@@ -90,21 +102,38 @@ async function internalRouter(session) {
    */
   process.stdin.once('end', stop);
   process.stdout.write(JSON.stringify(metadata) + '\n');
-}
+};
 
-async function withRouter(overrides, action) {
+const isRouterMetadata = (value: unknown): value is RouterMetadata => {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'base' in value &&
+    typeof value.base === 'string'
+  );
+};
+
+export const withRouter = async <T>(
+  overrides: SettingsOverrides,
+  action: (session: RouterSession) => Promise<T>
+): Promise<T> => {
   state.requireAuth();
   const active = state.activeSettings(overrides);
 
   state.ensureState();
-  const env = { ...process.env, CLAUDE_CODEX_STATE_DIR: state.runtime };
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    CLAUDE_CODEX_STATE_DIR: state.runtime,
+  };
 
   for (const [key, value] of Object.entries(overrides))
-    env[key === 'model' ? 'CLAUDE_GPT_MODEL' : 'CLAUDE_GPT_EFFORT'] = value;
+    env[key === 'model' ? 'CLAUDE_CODEX_MODEL' : 'CLAUDE_CODEX_EFFORT'] = value;
   const key = crypto.randomBytes(32).toString('hex');
   const session = fs.mkdtempSync(path.join(state.runtime, 'session-'));
   const [command, ...args] = selfCommand(['__router', session]);
-  let router, exited, failure;
+  let router: ChildProcessByStdio<Writable, Readable, null> | undefined;
+  let exited: Promise<unknown> | undefined;
+  let failure: Error | undefined;
   const controller = new AbortController();
 
   const abort = () => {
@@ -116,28 +145,30 @@ async function withRouter(overrides, action) {
   process.once('SIGINT', abort);
 
   try {
-    router = spawn(command, args, {
+    const child = spawn(command, args, {
       env: { ...env, CLAUDE_CODEX_SESSION_KEY: key },
       stdio: ['pipe', 'pipe', 'inherit'],
     });
+
+    router = child;
     exited = new Promise((resolve) => {
-      return router.once('exit', resolve);
+      return child.once('exit', resolve);
     });
-    router.once('error', (error) => {
+    child.once('error', (error) => {
       failure = error;
     });
-    const metadata = await new Promise((resolve, reject) => {
+    const metadata = await new Promise<RouterMetadata>((resolve, reject) => {
       let output = '';
 
       const cleanup = () => {
         clearTimeout(timer);
-        router.stdout.removeListener('data', onData);
-        router.removeListener('error', onError);
-        router.removeListener('exit', onExit);
+        child.stdout.removeListener('data', onData);
+        child.removeListener('error', onError);
+        child.removeListener('exit', onExit);
         controller.signal.removeEventListener('abort', onAbort);
       };
 
-      const finish = (error, value) => {
+      const finish = (error: Error | null, value?: RouterMetadata) => {
         cleanup();
 
         if (error) {
@@ -146,41 +177,48 @@ async function withRouter(overrides, action) {
           return;
         }
 
-        resolve(value);
+        if (value) resolve(value);
       };
 
       const onAbort = () => {
         return finish(new Error('Session cancelled'));
       };
 
-      const onError = (error) => {
+      const onError = (error: Error) => {
         return finish(error);
       };
 
-      const onExit = (code) => {
+      const onExit = (code: number | null) => {
         return finish(new Error(`CCR exited during startup (${code})`));
       };
 
-      const onData = (chunk) => {
+      const onData = (chunk: Buffer) => {
         output += chunk.toString();
         if (output.length > 8192)
           return finish(new Error('Unexpected CCR startup output'));
         if (!output.includes('\n')) return;
 
+        let parsed: unknown;
+
         try {
-          finish(null, JSON.parse(output.split('\n')[0]));
+          parsed = JSON.parse(output.split('\n')[0]);
         } catch {
-          finish(new Error('Invalid CCR startup response'));
+          /**
+           * Не JSON — та же ошибка, что и для JSON без адреса: ниже.
+           */
         }
+
+        if (isRouterMetadata(parsed)) finish(null, parsed);
+        else finish(new Error('Invalid CCR startup response'));
       };
 
       const timer = setTimeout(() => {
         return finish(new Error('CCR startup timed out'));
       }, 20000);
 
-      router.stdout.on('data', onData);
-      router.once('error', onError);
-      router.once('exit', onExit);
+      child.stdout.on('data', onData);
+      child.once('error', onError);
+      child.once('exit', onExit);
       controller.signal.addEventListener('abort', onAbort, { once: true });
       if (controller.signal.aborted) onAbort();
     });
@@ -191,13 +229,13 @@ async function withRouter(overrides, action) {
     /**
      * Вычитываем pipe, хотя вывода роутера больше не ждём.
      */
-    router.stdout.resume();
+    child.stdout.resume();
 
     const died = () => {
       return controller.abort(new Error('Router exited'));
     };
 
-    router.once('exit', died);
+    child.once('exit', died);
 
     try {
       return await action({
@@ -208,7 +246,7 @@ async function withRouter(overrides, action) {
         signal: controller.signal,
       });
     } finally {
-      router.removeListener('exit', died);
+      child.removeListener('exit', died);
     }
   } finally {
     process.removeListener('SIGTERM', abort);
@@ -226,12 +264,22 @@ async function withRouter(overrides, action) {
 
     fs.rmSync(session, { recursive: true, force: true });
   }
-}
+};
 
-function spawnClient(command, args, { env, signal } = {}) {
-  return new Promise((resolve, reject) => {
-    if (signal?.aborted) return reject(new Error('Session cancelled'));
+export const spawnClient = (
+  command: string,
+  args: string[],
+  { env, signal }: SpawnClientOptions = {}
+) => {
+  return new Promise<number>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error('Session cancelled'));
+
+      return;
+    }
+
     const child = spawn(command, args, { env, stdio: 'inherit' });
+    let killTimer: NodeJS.Timeout | undefined;
 
     const terminate = () => {
       return child.kill('SIGTERM');
@@ -249,8 +297,6 @@ function spawnClient(command, args, { env, signal } = {}) {
       killTimer.unref();
     };
 
-    let killTimer;
-
     signal?.addEventListener('abort', force, { once: true });
     process.once('SIGTERM', terminate);
     process.once('SIGINT', interrupt);
@@ -262,7 +308,7 @@ function spawnClient(command, args, { env, signal } = {}) {
       signal?.removeEventListener('abort', force);
     };
 
-    child.once('error', (error) => {
+    child.once('error', (error: NodeJS.ErrnoException) => {
       cleanup();
       reject(
         new Error(
@@ -281,6 +327,4 @@ function spawnClient(command, args, { env, signal } = {}) {
       resolve(code ?? (sig === 'SIGTERM' ? 143 : 130));
     });
   });
-}
-
-module.exports = { selfCommand, parseOverrides, internalRouter, withRouter, spawnClient };
+};

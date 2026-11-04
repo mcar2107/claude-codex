@@ -10,16 +10,15 @@
 - Provenance, integration boundaries and rebuild details: `vendor/ccr/PROVENANCE.md`.
 
 The new CLI bundles selected source modules rather than modifying the published
-minified CLI. The legacy local implementation remains outside the npm archive.
+minified CLI.
 No third-party author is represented as endorsing this wrapper.
 
 ## Bundled libraries and runtime
 
 `THIRD_PARTY_LICENSES.txt` is generated from the dependency packages actually used
-by esbuild. It includes package versions and complete available LICENSE/NOTICE
-texts. `dist/cli.cjs.LEGAL.txt` retains code-level notices discovered by esbuild.
-These are included in the npm archive; standalone directories include the license
-collection and CCR license alongside the binary.
+by Bun.build. It includes package versions and complete available LICENSE/NOTICE
+texts. Code-level license comments are kept inline in `dist/cli.js`. Standalone
+directories include the license collection and CCR license alongside the binary.
 
 Standalone executables include the Bun runtime. The standalone build is pinned
 to Bun 1.4.4 and includes `BUN-LICENSE.md`, copied from that exact runtime tag:

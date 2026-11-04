@@ -6,7 +6,8 @@ paths:
 
 # TypeScript
 
-TypeScript в проекте — только адаптер `src/transport/` к исходникам vendor/ccr; остальной код — CommonJS (`.cjs`).
+Весь код проекта — TypeScript, ESM; Bun исполняет `.ts` напрямую, `tsc` только проверяет типы (`noEmit`). Импорты своих
+модулей — без расширения (`moduleResolution: bundler`).
 
 1. Типы — в отдельных `*.types.ts` рядом с кодом (`server.ts` → `server.types.ts`). Не инлайни объектные типы в
    сигнатуре: правило jsdoc ниже требует описания каждого поля, а в сигнатуре его негде писать.
@@ -45,6 +46,11 @@ const config = rawValue as unknown as Config;
 
 ### Проверка типов
 
-`npm run typecheck` — `tsc -p tsconfig.json`. В проверку транзитивно попадает vendor/ccr: `tsconfig.json` повторяет
-подмены `scripts/build.cjs` (`@/transformer`, `@/*`, `@caeliq/ccr-shared`). `openai` и `@anthropic-ai/sdk` в
+`bun run typecheck` — `tsc -p tsconfig.json`. В проверку транзитивно попадает vendor/ccr: `tsconfig.json` повторяет
+подмены `scripts/build.ts` (`@/transformer`, `@/*`, `@caeliq/ccr-shared`). `openai` и `@anthropic-ai/sdk` в
 devDependencies — только ради их типов в коде upstream; в бандл они не попадают.
+
+### Объявления модулей
+
+`declare module` для виртуальных модулей плагина сборки — в `*.types.ts` (`src/transport/tiktoken.types.ts`), не в
+`*.d.ts`: `tiktoken.d.ts` рядом с `tiktoken.ts` tsc принял бы за его выход компиляции и не прочитал.

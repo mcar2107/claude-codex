@@ -1,11 +1,12 @@
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
-function setup(args) {
-  const remove = args.length === 1 && args[0] === '--remove';
+export const setup = (args: string[]) => {
+  const shouldRemove = args.length === 1 && args[0] === '--remove';
 
-  if (args.length && !remove) throw new Error('Usage: claude-codex setup [--remove]');
+  if (args.length && !shouldRemove)
+    throw new Error('Usage: claude-codex setup [--remove]');
   const directory = path.join(
     process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'),
     'commands'
@@ -27,22 +28,20 @@ function setup(args) {
   for (const item of files)
     if (fs.existsSync(item.file) && fs.readFileSync(item.file, 'utf8') !== item.content)
       throw new Error(
-        `Refusing to ${remove ? 'remove' : 'replace'} a modified or foreign command: ${item.file}`
+        `Refusing to ${shouldRemove ? 'remove' : 'replace'} a modified or foreign command: ${item.file}`
       );
-  if (!remove) fs.mkdirSync(directory, { recursive: true });
+  if (!shouldRemove) fs.mkdirSync(directory, { recursive: true });
 
   for (const item of files) {
-    if (remove) {
+    if (shouldRemove) {
       if (fs.existsSync(item.file)) fs.unlinkSync(item.file);
     } else if (!fs.existsSync(item.file))
       fs.writeFileSync(item.file, item.content, { mode: 0o600, flag: 'wx' });
   }
 
   console.log(
-    remove
+    shouldRemove
       ? 'claude-codex slash commands removed.'
-      : 'Installed /codex-settings, /codex-model, /codex-effort. Existing /gpt-* commands were not changed.'
+      : 'Installed /codex-settings, /codex-model, /codex-effort.'
   );
-}
-
-module.exports = { setup };
+};

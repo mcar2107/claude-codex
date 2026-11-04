@@ -1,11 +1,9 @@
 node_modules
 dist
 artifacts
-bin
 licenses
-.runtime
 .work
-package-lock.json
+bun.lock
 THIRD_PARTY_LICENSES.txt
 
 # Исходники upstream байт в байт: хеши сверяет vendor/ccr/original-sha256.json.

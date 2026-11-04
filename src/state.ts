@@ -1,19 +1,17 @@
-const fs = require('node:fs');
-const path = require('node:path');
-const os = require('node:os');
-const crypto = require('node:crypto');
-/**
- * Старые переменные окружения поддерживаются, но .runtime проекта неявно не выбирается никогда.
- */
-const runtime = path.resolve(
-  process.env.CLAUDE_CODEX_STATE_DIR ||
-    process.env.CLAUDE_GPT_STATE_DIR ||
-    path.join(os.homedir(), '.claude-codex')
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+import type { AuthFile, Settings, SettingsInput, SettingsOverrides } from './state.types';
+
+export const runtime = path.resolve(
+  process.env.CLAUDE_CODEX_STATE_DIR || path.join(os.homedir(), '.claude-codex')
 );
-const settingsFile = path.join(runtime, 'settings.json');
-const authFile = path.join(runtime, 'codex_auth.json');
-const defaults = { model: 'gpt-6.1-sol', reasoningEffort: 'high' };
-const models = [
+export const settingsFile = path.join(runtime, 'settings.json');
+export const authFile = path.join(runtime, 'codex_auth.json');
+export const defaults: Settings = { model: 'gpt-6.1-sol', reasoningEffort: 'high' };
+export const models = [
   'gpt-6.1-sol',
   'gpt-6-astra',
   'gpt-6.1-terra',
@@ -30,30 +28,31 @@ const models = [
   'gpt-5.2',
 ];
 
-function effortsFor(model) {
+export const effortsFor = (model: string): string[] => {
   if (/^gpt-(6|5\.6)(?:[.-]|$)/.test(model))
     return ['low', 'medium', 'high', 'xhigh', 'max'];
   if (model === 'gpt-5.5') return ['low', 'medium', 'high', 'xhigh'];
 
   return ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'];
-}
+};
 
-function validate(value) {
+const validate = (value: SettingsInput): Settings => {
   const model = String(value.model || '').replace(/^codex,/, '');
+  const { reasoningEffort } = value;
 
   if (!/^gpt-[a-z0-9][a-z0-9.-]*$/.test(model))
     throw new Error('Expected a GPT model ID, such as gpt-6.1-sol');
-  if (!effortsFor(model).includes(value.reasoningEffort))
+  if (typeof reasoningEffort !== 'string' || !effortsFor(model).includes(reasoningEffort))
     throw new Error(`${model}: supported effort levels: ${effortsFor(model).join(', ')}`);
 
-  return { model, reasoningEffort: value.reasoningEffort };
-}
+  return { model, reasoningEffort };
+};
 
-function ensureState() {
+export const ensureState = () => {
   fs.mkdirSync(runtime, { recursive: true, mode: 0o700 });
-}
+};
 
-function writeJson(file, data) {
+export const writeJson = (file: string, data: unknown) => {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   const temporary = `${file}.${process.pid}.${crypto.randomBytes(8).toString('hex')}.tmp`;
 
@@ -66,36 +65,39 @@ function writeJson(file, data) {
   } finally {
     fs.rmSync(temporary, { force: true });
   }
-}
+};
 
-function readSettings() {
+export const readSettings = (): Settings => {
   return validate(
     fs.existsSync(settingsFile)
       ? JSON.parse(fs.readFileSync(settingsFile, 'utf8'))
       : defaults
   );
-}
+};
 
-function saveSettings(value) {
+export const saveSettings = (value: SettingsInput) => {
   writeJson(settingsFile, validate(value));
-}
+};
 
-function activeSettings(overrides = {}, env = process.env) {
+export const activeSettings = (
+  overrides: SettingsOverrides = {},
+  env: NodeJS.ProcessEnv = process.env
+): Settings => {
   return validate({
     ...readSettings(),
-    ...(env.CLAUDE_GPT_MODEL ? { model: env.CLAUDE_GPT_MODEL } : {}),
-    ...(env.CLAUDE_GPT_EFFORT ? { reasoningEffort: env.CLAUDE_GPT_EFFORT } : {}),
+    ...(env.CLAUDE_CODEX_MODEL ? { model: env.CLAUDE_CODEX_MODEL } : {}),
+    ...(env.CLAUDE_CODEX_EFFORT ? { reasoningEffort: env.CLAUDE_CODEX_EFFORT } : {}),
     ...overrides,
   });
-}
+};
 
-function requireAuth() {
+export const requireAuth = (): AuthFile => {
   let auth;
 
   try {
     auth = JSON.parse(fs.readFileSync(authFile, 'utf8'));
   } catch (error) {
-    if (error.code === 'ENOENT')
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT')
       throw new Error('Not authenticated. Run: claude-codex auth login', {
         cause: error,
       });
@@ -108,20 +110,4 @@ function requireAuth() {
     throw new Error('OAuth access token missing. Run: claude-codex auth login');
 
   return auth;
-}
-
-module.exports = {
-  runtime,
-  settingsFile,
-  authFile,
-  defaults,
-  models,
-  effortsFor,
-  validate,
-  ensureState,
-  writeJson,
-  readSettings,
-  saveSettings,
-  activeSettings,
-  requireAuth,
 };

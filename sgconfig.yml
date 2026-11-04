@@ -2,6 +2,3 @@ ruleDirs:
   - .ast-grep/rules
 testConfigs:
   - testDir: .ast-grep/tests
-# .cjs и .mjs — тем же парсером TypeScript: JS — его подмножество, и одно правило покрывает весь код.
-languageGlobs:
-  typescript: ['*.cjs', '*.mjs']

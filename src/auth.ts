@@ -1,19 +1,39 @@
-const fs = require('node:fs');
-const http = require('node:http');
-const crypto = require('node:crypto');
-const state = require('./state.cjs');
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import http from 'node:http';
+
+import type { JwtClaims, LoginOptions, TokenExchange } from './auth.types';
+import * as state from './state';
+
 const CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
 const REDIRECT_URI = 'http://localhost:1455/auth/callback';
 
-function claims(token) {
+const claims = (token: string | undefined): JwtClaims => {
   try {
-    return JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8'));
+    return JSON.parse(
+      Buffer.from(token?.split('.')[1] || '', 'base64url').toString('utf8')
+    );
   } catch {
     return {};
   }
-}
+};
 
-function status() {
+/**
+ * Обязательные поля проверяются в рантайме: ответ token endpoint — внешний ввод.
+ */
+const isTokenExchange = (value: unknown): value is TokenExchange => {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    ['access_token', 'refresh_token', 'id_token'].every((key) => {
+      const field: unknown = Reflect.get(value, key);
+
+      return typeof field === 'string' && field;
+    })
+  );
+};
+
+export const status = () => {
   if (!fs.existsSync(state.authFile)) {
     console.log('OAuth credentials: missing\nRun: claude-codex auth login');
 
@@ -24,20 +44,21 @@ function status() {
   const expiry = claims(auth.access_token).exp || auth.expires_at;
 
   console.log(
-    `OAuth credentials: present\nAccess expires: ${Number.isFinite(expiry) ? new Date(expiry * 1000).toISOString() : 'unknown'}\nRefresh token: ${auth.refresh_token ? 'present' : 'missing'}`
+    `OAuth credentials: present\nAccess expires: ${typeof expiry === 'number' && Number.isFinite(expiry) ? new Date(expiry * 1000).toISOString() : 'unknown'}\nRefresh token: ${auth.refresh_token ? 'present' : 'missing'}`
   );
 
   return 0;
-}
+};
 
-async function validTokens() {
+export const validTokens = async () => {
   state.requireAuth();
   process.env.CCR_CODEX_AUTH_FILE = state.authFile;
+  const { getValidAccessToken } = await import('../vendor/ccr/core/src/utils/codex-auth');
 
-  return require('../vendor/ccr/core/src/utils/codex-auth.ts').getValidAccessToken();
-}
+  return getValidAccessToken();
+};
 
-async function login({
+export const login = async ({
   port = 1455,
   onUrl = (url) => {
     return console.log(`Open this URL in your browser (valid for 5 minutes):\n${url}`);
@@ -45,7 +66,7 @@ async function login({
   fetchImpl = fetch,
   timeout = 300000,
   signal,
-} = {}) {
+}: LoginOptions = {}) => {
   state.ensureState();
   const verifier = crypto.randomBytes(48).toString('base64url');
   const nonce = crypto.randomBytes(32).toString('base64url');
@@ -64,13 +85,12 @@ async function login({
     codex_cli_simplified_flow: 'true',
     id_token_add_organizations: 'true',
   }).toString();
-  let finish,
-    fail,
-    busy = false;
-  const done = new Promise((resolve, reject) => {
-    finish = resolve;
-    fail = reject;
-  });
+  const {
+    promise: done,
+    resolve: finish,
+    reject: fail,
+  } = Promise.withResolvers<number>();
+  let isBusy = false;
 
   /**
    * Обработчик отказа вешается до listen и колбэков: иначе они успеют отклонить промис без обработчика.
@@ -79,7 +99,7 @@ async function login({
   const controller = new AbortController();
   const server = http.createServer(async (request, response) => {
     response.setHeader('Cache-Control', 'no-store');
-    const callback = new URL(request.url, 'http://localhost');
+    const callback = new URL(request.url || '/', 'http://localhost');
 
     if (request.method !== 'GET' || callback.pathname !== '/auth/callback') {
       response.writeHead(404).end();
@@ -108,13 +128,13 @@ async function login({
 
     const code = callback.searchParams.get('code');
 
-    if (!code || busy) {
+    if (!code || isBusy) {
       response.writeHead(400).end('Invalid or duplicate callback.');
 
       return;
     }
 
-    busy = true;
+    isBusy = true;
 
     try {
       const result = await fetchImpl('https://auth.openai.com/oauth/token', {
@@ -132,7 +152,7 @@ async function login({
 
       if (!result.ok)
         throw new Error(`OAuth token exchange failed (HTTP ${result.status})`);
-      let tokens;
+      let tokens: unknown;
 
       try {
         tokens = await result.json();
@@ -140,11 +160,7 @@ async function login({
         throw new Error('Invalid OAuth token exchange response');
       }
 
-      if (
-        !['access_token', 'refresh_token', 'id_token'].every((key) => {
-          return typeof tokens[key] === 'string' && tokens[key];
-        })
-      )
+      if (!isTokenExchange(tokens))
         throw new Error('OAuth exchange omitted required credentials');
       const idClaims = claims(tokens.id_token)['https://api.openai.com/auth'] || {};
 
@@ -181,14 +197,14 @@ async function login({
     return abort();
   };
 
-  let timer;
+  let timer: NodeJS.Timeout | undefined;
 
   process.once('SIGINT', onInterrupt);
   process.once('SIGTERM', onInterrupt);
   signal?.addEventListener('abort', abort, { once: true });
 
   try {
-    await new Promise((resolve, reject) => {
+    await new Promise<void>((resolve, reject) => {
       server.once('error', reject);
       server.listen(port, '127.0.0.1', resolve);
     });
@@ -197,8 +213,12 @@ async function login({
       controller.abort();
       fail(new Error('OAuth login timed out'));
     }, timeout);
+    const address = server.address();
+
+    if (!address || typeof address === 'string')
+      throw new Error('OAuth callback is not listening');
     if (signal?.aborted) abort();
-    else await onUrl(url.toString(), server.address());
+    else await onUrl(url.toString(), address);
     await done;
     console.log('OAuth credentials saved. Run: claude-codex doctor');
 
@@ -215,6 +235,4 @@ async function login({
         return server.close(resolve);
       });
   }
-}
-
-module.exports = { status, login, validTokens, claims };
+};

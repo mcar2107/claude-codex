@@ -1,19 +1,17 @@
 {
   /**
-   * Проверка типов и typed-lint своего TypeScript (`src/transport/*.ts`). Код vendor/ccr попадает в
-   * проверку транзитивно — через импорты адаптера, — поэтому алиасы повторяют подмены
-   * scripts/build.cjs: `@/…` → vendor/ccr/core/src, `@caeliq/ccr-shared` → адаптер.
+   * Проверка типов и typed-lint всего TypeScript проекта. Код vendor/ccr попадает в проверку
+   * транзитивно — через импорты адаптера, — поэтому алиасы повторяют подмены scripts/build.ts:
+   * `@/…` → vendor/ccr/core/src, `@caeliq/ccr-shared` → адаптер.
    */
   "compilerOptions": {
     "target": "ES2022",
     "module": "preserve",
     "moduleResolution": "bundler",
     "lib": ["ES2023", "DOM"],
-    "types": ["node"],
+    "types": ["bun"],
     "strict": true,
     "noEmit": true,
-    "allowJs": true,
-    "checkJs": false,
     "esModuleInterop": true,
     "resolveJsonModule": true,
     "skipLibCheck": true,
@@ -24,5 +22,5 @@
       "@caeliq/ccr-shared": ["./src/transport/shared.ts"]
     }
   },
-  "include": ["src/**/*.ts"]
+  "include": ["*.ts", "src/**/*.ts", "scripts/**/*.ts", "tests/**/*.ts"]
 }

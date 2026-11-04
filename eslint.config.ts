@@ -18,9 +18,7 @@ export default defineConfig(
       'dist/**',
       'node_modules/**',
       'artifacts/**',
-      'bin/**',
       'licenses/**',
-      '.runtime/**',
       '.work/**',
     ],
   },
@@ -35,7 +33,7 @@ export default defineConfig(
       globals: {
         ...globals.node,
         /**
-         * Рантайм CLI — Bun: версия и признак standalone-бинарника берутся из его глобала.
+         * Рантайм — Bun: версия и признак standalone-бинарника берутся из его глобала.
          */
         Bun: 'readonly',
       },
@@ -85,16 +83,6 @@ export default defineConfig(
           contexts: ['TSPropertySignature'],
         },
       ],
-    },
-  },
-  {
-    /**
-     * CommonJS — формат исходников CLI: `require` здесь и есть импорт, а ленивый `require` внутри
-     * команды не грузит модули, которые этой команде не нужны.
-     */
-    files: ['**/*.cjs'],
-    rules: {
-      '@typescript-eslint/no-require-imports': 'off',
     },
   },
   {

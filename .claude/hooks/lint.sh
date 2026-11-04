@@ -71,7 +71,7 @@ to_rel() {
   local rel="${abs#"$REPO_ROOT"/}"
 
   case "$rel" in
-    node_modules/*|dist/*|vendor/*|artifacts/*|bin/*|.runtime/*|.work/*) return 0 ;;
+    node_modules/*|dist/*|vendor/*|artifacts/*|.work/*) return 0 ;;
   esac
 
   printf '%s\n' "$rel"

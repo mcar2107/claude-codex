@@ -1,12 +1,9 @@
 node_modules/
-.runtime/
 .work/
 dist/
 artifacts/
-*.tgz
-# Generated: local launchers with absolute paths (install.cjs) and build license bundle.
-bin/
+# Generated: build license bundle.
 THIRD_PARTY_LICENSES.txt
 
-# Кэш eslint (`npm run lint:es`).
+# Кэш eslint (`bun run lint:es`).
 .eslintcache

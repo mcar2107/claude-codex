@@ -1,8 +1,7 @@
 ---
 paths:
   - "tests/**"
-  - "scripts/test*.cjs"
-  - "verify*.cjs"
+  - "scripts/test*.ts"
 ---
 
 # Тестирование
@@ -12,17 +11,20 @@ paths:
 
 | Команда | Что | Как |
 |---|---|---|
-| `bun run test` | офлайн-тесты нового CLI: настройки, транспорт CCR → mock Codex, SSE, отмена, PKCE OAuth, refresh, миграция, setup | `scripts/test.cjs` собирает `tests/offline.cjs` esbuild-ом с плагином `scripts/build.cjs` и запускает бандл |
-| `bun scripts/test.cjs --standalone` | те же тесты скомпилированным бинарником без Node/Bun в `PATH` | `bun build --compile` |
-| `bun run test:package` | `npm pack`, чистая установка tarball, сохранность state, standalone | `scripts/test-package.cjs`; нужен `bun run build:standalone` |
-| `npm run test:legacy` | старый путь `claude-gpt*`: live settings, откат, транспорт | `verify.cjs`, `verify-transport.cjs` |
+| `bun run test` | офлайн-тесты нового CLI: настройки, транспорт CCR → mock Codex, SSE, отмена, PKCE OAuth, refresh, setup | `scripts/test.ts` собирает `tests/offline.ts` через `Bun.build` с плагином `scripts/build.ts` и запускает бандл |
+| `bun scripts/test.ts --standalone` | те же тесты скомпилированным бинарником без Node/Bun в `PATH` | `bun build --compile` |
+| `bun run test:e2e` | `dist/cli.js` и перенесённый standalone с фейковым клиентом Claude: свой роутер, WASM, код выхода, параллельные сессии, уборка | `scripts/test-e2e.ts`; нужен `bun run build:standalone` |
 
 1. **Без настоящих учётных данных и сети.** State — во временном каталоге (`CLAUDE_CODEX_STATE_DIR` на `mkdtemp`),
    upstream Codex и token endpoint — локальные моки, токены — фейковые. Настоящий запрос — только `claude-codex doctor`
    руками, не в тестах.
-2. **Новый сценарий** — в `tests/offline.cjs` отдельным блоком со своей строкой `PASS: …`, описывающей проверенное.
+2. **Новый сценарий** — в `tests/offline.ts` отдельным блоком со своей строкой `PASS: …`, описывающей проверенное.
 3. **Логика, до которой тест не дотянется** (браузер, реальный Codex), выносится в чистую функцию и тестируется она,
    обёртка остаётся тонкой.
-4. **Гейт коммита** (`.husky/pre-commit`) гоняет `npm test` целиком — тесты офлайн и идут меньше секунды. `test:legacy`
-   и `test:package` — руками перед завершением задачи, если правка их касается.
+4. **Гейт коммита** (`.husky/pre-commit`) гоняет `bun run test` целиком — тесты офлайн и идут меньше секунды.
+   `test:e2e` — руками перед завершением задачи, если правка его касается.
 5. **Стиль** — конвенции проекта действуют и в тестах: JSDoc на русском, `arrow-body-style`, без цепочек итераторов.
+6. **Env до импорта.** `src/state.ts` читает state-каталог из env при загрузке, а статические импорты ESM
+   всплывают выше присваиваний. Тест сначала настраивает env, затем импортирует модули проекта через `await import()`.
+7. **Мок `fetch`** — через `Object.assign(impl, { preconnect })`: у глобального `fetch` Bun есть `preconnect`, без него
+   присваивание не пройдёт typecheck.
