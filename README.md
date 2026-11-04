@@ -6,8 +6,8 @@ the terminal UI, permissions, tools, MCP, CLAUDE.md and conversation history.
 This package supplies a private local transport to Codex; it does not install,
 replace or redistribute Claude Code.
 
-**Status: early development.** Standalone binaries are published as
-[GitHub prereleases](https://github.com/mcar2107/claude-codex/releases); they
+**Status: stable since v1.0.0.** Standalone binaries are published as
+[GitHub releases](https://github.com/mcar2107/claude-codex/releases); they
 are unsigned and verified only by the checks listed below. No npm package is
 published (`private` in `package.json`), and the registry name and public CLI
 naming have not been finalized. The original wrapper code is MIT-licensed.
