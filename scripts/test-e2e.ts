@@ -322,15 +322,14 @@ const exercise = async (cli: string, isStandalone: boolean) => {
   const result = await finish(start(cli, ['--record', one], env), `${kind} launch`);
 
   assert.equal(result.code, 7, result.output);
-  assert.equal(env.CLAUDE_CODE_AUTO_MODE_SERVER, '1');
+  assert(JSON.parse(fs.readFileSync(one + '.tokens', 'utf8')).input_tokens > 0);
+  assert(fs.readFileSync(one + '.shim', 'utf8').includes(packageJson.version));
+  assert(!sessions(state).length, 'session must be cleaned after Claude exit');
   /**
    * Первый запуск перекрывает унаследованное включение; параллельные ниже проверяют запуск
    * без переменной в окружении родителя.
    */
   delete env.CLAUDE_CODE_AUTO_MODE_SERVER;
-  assert(JSON.parse(fs.readFileSync(one + '.tokens', 'utf8')).input_tokens > 0);
-  assert(fs.readFileSync(one + '.shim', 'utf8').includes(packageJson.version));
-  assert(!sessions(state).length, 'session must be cleaned after Claude exit');
   const aFile = path.join(state, 'a'),
     bFile = path.join(state, 'b');
   const a = start(

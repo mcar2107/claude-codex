@@ -242,6 +242,11 @@ token on the service side.
 - Not yet verified for real: streaming and tool execution, model discovery,
   quota/429 handling, expired/revoked token recovery, cross-process refresh
   races, Codex limit headers.
+- Auto mode server-side safeguards are off in bridged sessions: the bridge sets
+  `CLAUDE_CODE_AUTO_MODE_SERVER=0` for the Claude client, overriding your own
+  value, because Codex returns no server verdicts. The client runs its own
+  classifier requests instead
+  ([classifier billing](https://code.claude.com/docs/en/auto-mode-classifier-billing)).
 - Binaries are not signed or notarized.
 - Token counting is exact but synchronous; very large requests can briefly
   block the router.
