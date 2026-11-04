@@ -6,12 +6,14 @@ the terminal UI, permissions, tools, MCP, CLAUDE.md and conversation history.
 This package supplies a private local transport to Codex; it does not install,
 replace or redistribute Claude Code.
 
-**Status: local distribution candidate, not a public release.** The package is
-`private`, version `0.1.0-dev.0`; the original wrapper code is MIT-licensed.
-Registry name availability, scope, release account and public CLI naming have
-not been finalized. Nothing here
-promises account access to any model or approval by Anthropic/OpenAI. Check the
-service's current account, subscription and usage terms before using the bridge.
+**Status: early development.** Standalone binaries are published as
+[GitHub prereleases](https://github.com/mcar2107/claude-codex/releases); they
+are unsigned and verified only by the checks listed below. No npm package is
+published (`private` in `package.json`), and the registry name and public CLI
+naming have not been finalized. The original wrapper code is MIT-licensed.
+Nothing here promises account access to any model or approval by
+Anthropic/OpenAI. Check the service's current account, subscription and usage
+terms before using the bridge.
 
 ## Requirements and local installation
 
@@ -19,10 +21,33 @@ service's current account, subscription and usage terms before using the bridge.
 - Claude Code installed separately as `claude` in `PATH` (an executable, not
   merely a shell alias). Ordinary `claude` is not changed by this package.
 - Bundled CLI (`dist/cli.js`): Bun >=1.4.0 in `PATH`.
-- Standalone: no separate Node or Bun required. Current native validation is
-  macOS arm64, built with Bun 1.4.4; other platforms are unverified.
+- Standalone: no separate Node or Bun required. Release binaries are built and
+  tested natively for macOS arm64/x64 and Linux x64/arm64 (glibc) with Bun 1.4.4.
 
-From the checkout:
+### Install a release binary (no Bun)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mcar2107/claude-codex/master/install.sh | sh
+```
+
+The installer picks the newest release (including prereleases) for your OS and
+architecture, verifies it against the release `SHA256SUMS`, installs
+`claude-codex` into `~/.local/bin` and the license notices into
+`~/.local/share/claude-codex`. It does not touch state, settings or Claude
+configuration. Options (environment variables):
+
+- `CLAUDE_CODEX_VERSION=v0.1.0`: install a specific release tag.
+- `CLAUDE_CODEX_INSTALL_DIR`: executable directory (default `~/.local/bin`).
+- `CLAUDE_CODEX_SHARE_DIR`: license notices directory.
+
+Manual install: download `claude-codex-<os>-<arch>.tar.gz` and `SHA256SUMS`
+from [GitHub Releases](https://github.com/mcar2107/claude-codex/releases),
+check the hash, unpack and put `claude-codex` in `PATH`. Binaries are not
+signed or notarized: an archive downloaded by a macOS browser is quarantined,
+remove that with `xattr -d com.apple.quarantine claude-codex` (`curl` downloads
+are not quarantined). musl-based Linux (Alpine) is not supported.
+
+### Build from the checkout
 
 ```sh
 bun install
@@ -31,8 +56,8 @@ bun run build:standalone
 bun run test:e2e
 ```
 
-No installable package archive is produced at the moment. Run the bundle with
-Bun, or use the standalone executable (below):
+No npm package is produced. Run the bundle with Bun, or use the standalone
+executable (below):
 
 ```sh
 bun dist/cli.js --help
@@ -44,7 +69,7 @@ bun dist/cli.js
 Building does not write settings, tokens, Claude commands or global Claude
 configuration.
 
-For standalone, use `artifacts/bun-darwin-arm64/claude-codex` on the tested host.
+For standalone, use `artifacts/bun-<os>-<arch>/claude-codex`.
 The adjacent license files belong with the binary when redistributing it. You
 can relocate it; no project path or runtime assets need to be installed beside
 it. Add it to `PATH` if using the optional slash commands.
@@ -184,14 +209,29 @@ notices. Cross-compilation does not prove runtime support. Current evidence:
 
 | Target | Evidence |
 | --- | --- |
-| macOS arm64 | Native compile, relocated executable, local server/client lifecycle without Node/Bun in PATH; compiled mock transport/OAuth tests |
-| macOS x64 | Build target defined; not compiled or run here |
-| Linux x64 | Build target defined; not compiled or run here |
-| Linux arm64 | Build target defined; not compiled or run here |
+| macOS arm64 | Native compile, relocated executable, local server/client lifecycle without Node/Bun in PATH; compiled mock transport/OAuth tests; release CI (`macos-15`) |
+| macOS x64 | Release CI on `macos-15-intel`: native compile, offline, compiled and e2e tests |
+| Linux x64 | Release CI on `ubuntu-24.04`: native compile, offline, compiled and e2e tests |
+| Linux arm64 | Release CI on `ubuntu-24.04-arm`: native compile, offline, compiled and e2e tests |
 | Windows | Not supported |
 
-macOS signing/notarization and Linux runtime testing are outstanding before
-public release. No automatic upstream submission or public release is performed.
+macOS signing/notarization is outstanding. No automatic upstream submission is
+performed.
+
+### Releases
+
+`.github/workflows/release.yml` runs on a pushed `v*` tag. The tag must equal
+`v` + the `package.json` version. Each target is built and tested on its own
+native runner (typecheck, offline tests, compiled tests, e2e), packed as
+`claude-codex-<os>-<arch>.tar.gz` with the license notices, and published to a
+GitHub release together with `SHA256SUMS`. A version with a suffix
+(`0.1.0-dev.1`) becomes a prerelease. Manual `workflow_dispatch` runs only
+build and test, without publishing.
+
+```sh
+# bump "version" in package.json, commit, then:
+git tag v0.1.0 && git push origin v0.1.0
+```
 
 ## Verification and remaining release gates
 
@@ -230,15 +270,17 @@ success from mock tests or a model label alone.
 
 ## Upgrade and uninstall
 
-Rebuild from an updated checkout or replace the standalone executable. Settings
-and tokens stay in the external state directory. Review model/transport
+Re-run the installer (or set `CLAUDE_CODEX_VERSION`), rebuild from an updated
+checkout or replace the standalone executable. Settings and tokens stay in the
+external state directory. Review model/transport
 compatibility before upgrading.
 
 ```sh
 claude-codex setup --remove   # only if setup was used
 ```
 
-Then remove the executable and its accompanying notices. This does not delete
+Then remove the executable and its accompanying notices (installer defaults:
+`~/.local/bin/claude-codex` and `~/.local/share/claude-codex`). This does not delete
 `~/.claude-codex`. Stop all sessions, back up or revoke
 credentials as appropriate, and remove that directory yourself only if you want
 to permanently erase local state. Uninstalling is not service-side token revocation.
@@ -250,4 +292,8 @@ Third-party components keep their own licenses: see `THIRD_PARTY_NOTICES.md`,
 generated `THIRD_PARTY_LICENSES.txt` and `vendor/ccr/LICENSE`. CCR's MIT notice
 is retained; code-level license comments stay inline in `dist/cli.js`.
 The standalone directory additionally contains exact-version Bun notices.
-Review redistribution requirements before publishing release binaries.
+Every release archive ships all of these notices next to the binary, and
+`install.sh` copies them to `~/.local/share/claude-codex`. The Bun runtime
+statically links LGPL-2 components (JavaScriptCore/WebKit, tinycc); this
+repository's full source and build scripts are public, so the binary can be
+rebuilt against a modified Bun as described in `BUN-LICENSE.md`.

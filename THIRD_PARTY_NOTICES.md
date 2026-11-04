@@ -22,9 +22,11 @@ directories include the license collection and CCR license alongside the binary.
 
 Standalone executables include the Bun runtime. The standalone build is pinned
 to Bun 1.4.4 and includes `BUN-LICENSE.md`, copied from that exact runtime tag:
-https://github.com/oven-sh/bun/blob/bun-v1.4.4/LICENSE.md. Verify redistribution
-requirements, including licenses of runtime components referenced there, before
-a public release. No wrapper flag for displaying Bun licenses is claimed.
+https://github.com/oven-sh/bun/blob/bun-v1.4.4/LICENSE.md. It lists statically
+linked LGPL-2 components (JavaScriptCore/WebKit, tinycc) and how to relink Bun;
+this repository's source and build scripts are public, so the standalone binary
+can be rebuilt against a modified runtime. Release archives ship these notices
+next to the binary. No wrapper flag for displaying Bun licenses is claimed.
 
 ## External clients and service
 

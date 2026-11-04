@@ -47,6 +47,8 @@ src/
 vendor/ccr/               исходники CCR upstream байт в байт — не править (vendor.md)
 scripts/                  сборка (build.ts — плагин подмен), standalone, лицензии, тест-раннеры
 tests/offline.ts          офлайн-тесты нового CLI (testing.md)
+.github/workflows/release.yml  сборка и публикация бинарников по тегу v* (release.md)
+install.sh                установщик бинарника из GitHub Releases (release.md)
 eslint.config.ts .prettierrc lint-staged.config.ts .husky/ tsconfig.json knip.jsonc sgconfig.yml .ast-grep/
 .agnix.toml .betterleaks.toml osv-scanner.toml .mise.toml   линтеры и гейт коммита (linting.md)
 ```
@@ -73,3 +75,4 @@ eslint.config.ts .prettierrc lint-staged.config.ts .husky/ tsconfig.json knip.js
 | `typescript.md` | типы адаптера, `as`, jsdoc на полях, typecheck с vendor |
 | `testing.md` | офлайн-тесты, standalone и e2e |
 | `vendor.md` | vendor/ccr и адаптер `src/transport/` |
+| `release.md` | релизный workflow, ассеты, `install.sh` |
