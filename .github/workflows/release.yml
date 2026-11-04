@@ -21,6 +21,8 @@ jobs:
   build:
     name: build ${{ matrix.asset }}
     runs-on: ${{ matrix.runner }}
+    # Сборка и тесты идут минуты; зависший e2e не должен держать раннер до лимита GitHub в 6 часов.
+    timeout-minutes: 30
     strategy:
       fail-fast: true
       matrix:
@@ -73,6 +75,7 @@ jobs:
     needs: build
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:

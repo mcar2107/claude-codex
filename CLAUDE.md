@@ -9,7 +9,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 claude-codex — мост Claude Code → Codex OAuth. Claude Code остаётся отдельно установленным клиентом (`claude` в
 `PATH`); пакет поднимает на каждую сессию свой локальный сервер CCR (claude-code-router) с приватным ключом и портом,
-переводит Anthropic Messages API в Responses API Codex и подставляет модель и effort из живых настроек. Пользовательская
+переводит Anthropic Messages API в Responses API Codex: модель и effort — из запроса клиента (`/model`, `/effort`),
+запасной вариант — настройки на старте сессии. Пользовательская
 документация, статус и ограничения — `README.md`.
 
 ## Стек и команды
@@ -54,6 +55,7 @@ tests/offline.ts          офлайн-тесты нового CLI (testing.md)
 install.sh                установщик бинарника из GitHub Releases (release.md)
 eslint.config.ts .prettierrc lint-staged.config.ts .husky/ tsconfig.json knip.jsonc sgconfig.yml .ast-grep/
 .agnix.toml .betterleaks.toml osv-scanner.toml .mise.toml   линтеры и гейт коммита (linting.md)
+.claude/hooks/lint.ts     PostToolUse-хук: eslint и tsc после каждой правки агента (linting.md)
 ```
 
 ## Сквозные правила

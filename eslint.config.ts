@@ -44,17 +44,6 @@ export default defineConfig(
   eslintPluginPrettierRecommended,
   {
     files: ['**/*.ts'],
-    rules: {
-      'no-unused-vars': 'off',
-      /**
-       * Глобалы описаны типами; необъявленное имя ловит tsc. Правило даёт только ложные
-       * срабатывания.
-       */
-      'no-undef': 'off',
-    },
-  },
-  {
-    files: ['**/*.ts'],
     languageOptions: {
       parserOptions: {
         projectService: true,
@@ -62,6 +51,11 @@ export default defineConfig(
       },
     },
     rules: {
+      /**
+       * Глобалы описаны типами; необъявленное имя ловит tsc. Правило даёт только ложные
+       * срабатывания.
+       */
+      'no-undef': 'off',
       '@typescript-eslint/no-floating-promises': 'error',
       '@typescript-eslint/consistent-type-definitions': ['error', 'type'],
       'jsdoc/require-jsdoc': [
@@ -129,7 +123,7 @@ export default defineConfig(
         },
       ],
       'operator-linebreak': [
-        2,
+        'error',
         'after',
         {
           overrides: {
@@ -138,11 +132,11 @@ export default defineConfig(
           },
         },
       ],
-      'padded-blocks': [2, 'never'],
-      'no-fallthrough': [2, { allowEmptyCase: true }],
+      'padded-blocks': ['error', 'never'],
+      'no-fallthrough': ['error', { allowEmptyCase: true }],
       'unicorn/switch-case-braces': ['error', 'always'],
       'padding-line-between-statements': [
-        2,
+        'error',
         {
           blankLine: 'always',
           prev: '*',

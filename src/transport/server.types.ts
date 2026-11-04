@@ -46,7 +46,7 @@ type CountTokensBody = {
  */
 export type CountTokensRoute = {
   /**
-   * Тело запроса.
+   * Тело запроса; запрос без тела или не-JSON приходит без него.
    */
-  Body: CountTokensBody;
+  Body: CountTokensBody | undefined;
 };

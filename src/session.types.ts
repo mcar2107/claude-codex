@@ -65,7 +65,7 @@ export type RouterSession = {
   env: NodeJS.ProcessEnv;
 
   /**
-   * Срабатывает при отмене сессии или смерти роутера.
+   * Срабатывает при отмене сессии или смерти роутера; причина отмены сигналом — имя сигнала.
    */
   signal: AbortSignal;
 };
@@ -77,7 +77,8 @@ export type SpawnClientOptions = {
   env?: NodeJS.ProcessEnv;
 
   /**
-   * Отмена сессии: клиент получает SIGTERM, через 2 секунды — SIGKILL.
+   * Отмена сессии: клиент получает сигнал из причины отмены (или SIGTERM), через 2 секунды —
+   * SIGKILL.
    */
   signal?: AbortSignal;
 };

@@ -2,12 +2,18 @@ import { parseOverrides } from './session';
 import * as state from './state';
 import type { ModelsCache, Settings } from './state.types';
 
-const PRESETS: Record<string, Settings> = {
-  sol: state.defaults,
-  balanced: { model: 'gpt-6.1-sol', reasoningEffort: 'high' },
-  fast: { model: 'gpt-6-luna', reasoningEffort: 'low' },
-  max: { model: 'gpt-6-astra', reasoningEffort: 'max' },
-};
+/**
+ * `Map`, а не объект: имя пресета приходит из аргументов, и `constructor` или `toString` не должны
+ * находить свойства прототипа.
+ */
+const PRESETS = new Map<string, Settings>([
+  ['sol', state.defaults],
+  ['balanced', { model: state.defaults.model, reasoningEffort: 'medium' }],
+  ['fast', { model: 'gpt-6-luna', reasoningEffort: 'low' }],
+  ['max', { model: 'gpt-6-astra', reasoningEffort: 'max' }],
+]);
+
+const SETTINGS_USAGE = 'Usage: claude-codex settings show|set|reset|preset';
 
 const show = () => {
   const { model, reasoningEffort } = state.readSettings();
@@ -40,28 +46,70 @@ const discoveryCache = (items: unknown[]) => {
   );
 };
 
+/**
+ * Новые настройки команды; `undefined` — команда только показывает текущие.
+ */
+const nextSettings = (command: string, rest: string[]): Settings | undefined => {
+  switch (command) {
+    case 'show':
+
+    case 'status': {
+      if (rest.length) throw new Error(SETTINGS_USAGE);
+
+      return undefined;
+    }
+
+    case 'set': {
+      const parsed = parseOverrides(rest);
+
+      if (parsed.rest.length || !Object.keys(parsed.overrides).length)
+        throw new Error('Usage: claude-codex settings set --model GPT-ID --effort LEVEL');
+
+      return { ...state.readSettings(), ...parsed.overrides };
+    }
+
+    case 'reset': {
+      if (rest.length) throw new Error(SETTINGS_USAGE);
+
+      return state.defaults;
+    }
+
+    case 'preset': {
+      const preset = rest.length === 1 ? PRESETS.get(rest[0]) : undefined;
+
+      if (!preset)
+        throw new Error(`Unknown preset. Choose ${[...PRESETS.keys()].join('|')}`);
+
+      return preset;
+    }
+
+    default: {
+      throw new Error(SETTINGS_USAGE);
+    }
+  }
+};
+
 export const settings = (args: string[]) => {
   const [command = 'show', ...rest] = args;
+  const next = nextSettings(command, rest);
 
-  if (['show', 'status'].includes(command) && !rest.length) return show();
-  let next: Settings | undefined;
-
-  if (command === 'set') {
-    const parsed = parseOverrides(rest);
-
-    if (parsed.rest.length || !Object.keys(parsed.overrides).length)
-      throw new Error('Usage: claude-codex settings set --model GPT-ID --effort LEVEL');
-    next = { ...state.readSettings(), ...parsed.overrides };
-  } else if (command === 'reset' && !rest.length) next = state.defaults;
-  else if (command === 'preset' && rest.length === 1) {
-    next = PRESETS[rest[0]];
-    if (!next) throw new Error('Unknown preset. Choose sol|balanced|fast|max');
-  } else throw new Error('Usage: claude-codex settings show|set|reset|preset');
+  if (!next) return show();
   state.saveSettings(next);
   show();
   console.log(
-    'Applies on the next request, including open sessions. Session overrides take precedence.'
+    'Saved as the default for new sessions. Open sessions keep their starting model and effort; switch them with /model and /effort.'
   );
+};
+
+/**
+ * Список моделей из ответа discovery: у одних версий API он в `models`, у других — в `data`.
+ */
+const discoveryItems = (data: unknown): unknown[] | undefined => {
+  if (typeof data !== 'object' || data === null) return undefined;
+  const models: unknown = Reflect.get(data, 'models');
+  const items: unknown = Array.isArray(models) ? models : Reflect.get(data, 'data');
+
+  return Array.isArray(items) ? items : undefined;
 };
 
 export const models = async (args: string[]) => {
@@ -90,21 +138,32 @@ export const models = async (args: string[]) => {
       throw new Error(
         `Model discovery failed (HTTP ${response.status}); saved settings and discovery cache preserved`
       );
-    const data = await response.json();
-    const items = Array.isArray(data.models)
-      ? data.models
-      : Array.isArray(data.data)
-        ? data.data
-        : null;
+    let data: unknown;
+
+    try {
+      data = await response.json();
+    } catch {
+      data = undefined;
+    }
+
+    const items = discoveryItems(data);
 
     if (!items)
       throw new Error(
         'Unexpected model discovery response; saved settings and cache preserved'
       );
+    const discovered = discoveryCache(items);
 
+    /**
+     * Пустой список — скорее сбой discovery, чем аккаунт без моделей: прежний кэш полезнее.
+     */
+    if (!discovered.models.length)
+      throw new Error(
+        'Model discovery returned no models; saved settings and cache preserved'
+      );
     state.writeJson(state.modelsCacheFile, {
       refreshedAt: new Date().toISOString(),
-      ...discoveryCache(items),
+      ...discovered,
     });
   }
 

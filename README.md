@@ -33,12 +33,14 @@ curl -fsSL https://raw.githubusercontent.com/mcar2107/claude-codex/master/instal
 The installer picks the newest release (including prereleases) for your OS and
 architecture, verifies it against the release `SHA256SUMS`, installs
 `claude-codex` into `~/.local/bin` and the license notices into
-`~/.local/share/claude-codex`. It does not touch state, settings or Claude
+`$XDG_DATA_HOME/claude-codex` (`~/.local/share/claude-codex` when
+`XDG_DATA_HOME` is unset). It does not touch state, settings or Claude
 configuration. Options (environment variables):
 
 - `CLAUDE_CODEX_VERSION=v0.1.0`: install a specific release tag.
 - `CLAUDE_CODEX_INSTALL_DIR`: executable directory (default `~/.local/bin`).
-- `CLAUDE_CODEX_SHARE_DIR`: license notices directory.
+- `CLAUDE_CODEX_SHARE_DIR`: license notices directory (default
+  `${XDG_DATA_HOME:-~/.local/share}/claude-codex`).
 
 Manual install: download `claude-codex-<os>-<arch>.tar.gz` and `SHA256SUMS`
 from [GitHub Releases](https://github.com/mcar2107/claude-codex/releases),
@@ -115,7 +117,8 @@ Files are private (`0600`) and new state/session directories are `0700`:
 
 Each launch owns its own child router, ephemeral loopback port and API key.
 The router binds port zero directly; there is no probe-and-rebind port race.
-Exit, SIGINT/SIGTERM and the parent pipe closing stop that session's router.
+Exit, SIGINT/SIGTERM/SIGHUP (closing the terminal tab) and the parent pipe
+closing stop that session's router; the signal is passed on to Claude.
 Normal shutdown removes session metadata. SIGKILL may leave a stale session
 folder; no automatic cleanup of unknown session folders is attempted. Never
 remove a folder belonging to a live process.
@@ -127,7 +130,7 @@ claude-codex settings show
 claude-codex settings set --model gpt-6.1-sol --effort xhigh
 claude-codex settings set --effort high
 claude-codex settings preset sol       # Sol high (default)
-claude-codex settings preset balanced  # Sol high
+claude-codex settings preset balanced  # Sol medium
 claude-codex settings preset fast      # Luna low
 claude-codex settings preset max       # Astra max
 claude-codex settings reset
@@ -150,10 +153,12 @@ Inside a session, switch with Claude Code's own `/model` and `/effort`. The
 and so on; Claude's built-in rows are hidden), passed to Claude through a
 session-only `--settings` file. The router takes the model and effort from each
 request; a request without a Codex model (a Claude alias, a background task)
-uses the starting model, and a request without effort uses the saved level.
-An effort the model does not support is lowered to the nearest supported level
-(for example `max` → `xhigh` on GPT-5.5). Changing saved settings from another
-terminal no longer affects open sessions.
+uses the session's starting model, and a request without effort uses its
+starting level. An effort the model does not support is lowered to the nearest
+supported level (for example `max` → `xhigh` on GPT-5.5). Saved settings are
+read once when a session starts: changing them (`claude-codex settings`,
+`/codex:settings`) sets the default for new sessions and does not affect open
+ones.
 
 In `/model`, **Enter** saves the choice as Claude Code's default in
 `~/.claude/settings.json` (`CLAUDE_CONFIG_DIR`), while **`s`** switches only the
@@ -361,7 +366,7 @@ claude-codex setup --remove   # only if an earlier version's setup was used
 ```
 
 Then remove the executable and its accompanying notices (installer defaults:
-`~/.local/bin/claude-codex` and `~/.local/share/claude-codex`). This does not delete
+`~/.local/bin/claude-codex` and `${XDG_DATA_HOME:-~/.local/share}/claude-codex`). This does not delete
 `~/.claude-codex`. Stop all sessions, back up or revoke
 credentials as appropriate, and remove that directory yourself only if you want
 to permanently erase local state. Uninstalling is not service-side token revocation.
@@ -374,7 +379,7 @@ generated `THIRD_PARTY_LICENSES.txt` and `vendor/ccr/LICENSE`. CCR's MIT notice
 is retained; code-level license comments stay inline in `dist/cli.js`.
 The standalone directory additionally contains exact-version Bun notices.
 Every release archive ships all of these notices next to the binary, and
-`install.sh` copies them to `~/.local/share/claude-codex`. The Bun runtime
+`install.sh` copies them to `${XDG_DATA_HOME:-~/.local/share}/claude-codex`. The Bun runtime
 statically links LGPL-2 components (JavaScriptCore/WebKit, tinycc); this
 repository's full source and build scripts are public, so the binary can be
 rebuilt against a modified Bun as described in `BUN-LICENSE.md`.

@@ -12,9 +12,15 @@ const TARGETS = [
 ];
 const root = path.resolve(import.meta.dirname, '..');
 
-if (Bun.version !== '1.4.4')
+/**
+ * Версия Bun, чей рантайм входит в бинарник: под неё лежит лицензия в `licenses/`, её же ставит
+ * workflow (release.md).
+ */
+const BUN_VERSION = '1.4.4';
+
+if (Bun.version !== BUN_VERSION)
   throw new Error(
-    'Standalone build currently requires Bun 1.4.4; review and update runtime notices before changing it.'
+    `Standalone build currently requires Bun ${BUN_VERSION}; review and update runtime notices before changing it.`
   );
 const native = `bun-${process.platform}-${process.arch}`;
 const args = process.argv.slice(2);
@@ -51,7 +57,7 @@ fs.copyFileSync(
   path.join(directory, 'CCR-LICENSE')
 );
 fs.copyFileSync(
-  path.join(root, 'licenses/BUN-1.4.4-LICENSE.md'),
+  path.join(root, `licenses/BUN-${BUN_VERSION}-LICENSE.md`),
   path.join(directory, 'BUN-LICENSE.md')
 );
 console.log(

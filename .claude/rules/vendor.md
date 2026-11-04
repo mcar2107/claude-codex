@@ -17,7 +17,10 @@ paths:
    upstream свои файлы: `@/transformer` → `registry.ts` (только Anthropic, OpenAI, Responses, Codex),
    `@caeliq/ccr-shared` → `shared.ts`, `tiktoken` → `tiktoken.ts` (WASM встроен в бандл base64-модулем), воркер подсчёта
    токенов → `token-count.ts`. Новая подмена — в плагине сборки, в `paths` `tsconfig.json` (иначе её не увидит
-   typecheck) и в `entry` `knip.jsonc`.
+   typecheck) и в `entry` `knip.jsonc`. Исключения из `paths`: `tiktoken` (tsc читает типы самого пакета, адаптер
+   повторяет его API), виртуальные `tiktoken-bindings` / `tiktoken-wasm` (объявлены в `tiktoken.types.ts`) и
+   `./token-count-worker` (подменяется только для импорта из `utils/router.ts`, а алиас `paths` подменил бы его для
+   всех). Контракт такой подмены держат типы: экспорты адаптера объявлены через `typeof` экспортов upstream.
 3. **Контракт подмен — экспорты upstream.** Имена и форма экспортов файла адаптера повторяют модуль, который он
    заменяет (отсюда default-экспорт `registry.ts`).
 4. **Обновление upstream** — новая ревизия целиком: исходники, `original-sha256.json`, `PROVENANCE.md`, затем

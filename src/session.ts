@@ -1,6 +1,7 @@
-import { type ChildProcessByStdio, spawn } from 'node:child_process';
+import { type ChildProcess, type ChildProcessByStdio, spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import type { Readable, Writable } from 'node:stream';
 
@@ -13,10 +14,55 @@ import type {
 import * as state from './state';
 import type { SettingsOverrides } from './state.types';
 
-const sleep = (ms: number) => {
-  return new Promise((resolve) => {
-    return setTimeout(resolve, ms);
+/**
+ * Сколько процесс сессии ждёт после сигнала до SIGKILL. Тот же срок роутер даёт себе на
+ * закрытие сервера перед принудительным выходом.
+ */
+const KILL_GRACE_MS = 2000;
+
+/**
+ * Родитель ждёт роутер чуть дольше его собственного дедлайна: штатный выход роутера успевает
+ * раньше SIGKILL.
+ */
+const ROUTER_STOP_GRACE_MS = KILL_GRACE_MS + 200;
+
+const STARTUP_TIMEOUT_MS = 20_000;
+
+/**
+ * Первая строка stdout роутера — короткий JSON с адресом; больше — значит, это не он.
+ */
+const MAX_STARTUP_OUTPUT = 8192;
+
+/**
+ * Сигналы завершения: сессия отменяется, клиент получает тот же сигнал. SIGHUP приходит при
+ * закрытии вкладки терминала — без обработчика процесс умер бы до уборки сессии.
+ */
+const SESSION_SIGNALS: NodeJS.Signals[] = ['SIGINT', 'SIGTERM', 'SIGHUP'];
+
+const isSessionSignal = (value: unknown): value is NodeJS.Signals => {
+  return SESSION_SIGNALS.some((name) => {
+    return name === value;
   });
+};
+
+/**
+ * Сигнал процессу и SIGKILL, если тот не вышел за `graceMs`. Таймер снимается при выходе
+ * процесса и не держит event loop.
+ */
+const signalWithEscalation = (
+  child: ChildProcess,
+  signal: NodeJS.Signals,
+  graceMs: number
+) => {
+  const timer = setTimeout(() => {
+    return child.kill('SIGKILL');
+  }, graceMs);
+
+  timer.unref();
+  child.once('exit', () => {
+    return clearTimeout(timer);
+  });
+  child.kill(signal);
 };
 
 /**
@@ -92,14 +138,14 @@ export const internalRouter = async (session: string | undefined) => {
   state.writeJson(path.join(session, 'health.json'), metadata);
   let isStopping = false;
 
-  const stop = async () => {
+  const handleStop = async () => {
     if (isStopping) return;
     isStopping = true;
-    const force = setTimeout(() => {
+    const deadline = setTimeout(() => {
       return process.exit(1);
-    }, 2000);
+    }, KILL_GRACE_MS);
 
-    force.unref();
+    deadline.unref();
 
     try {
       await app.close();
@@ -108,13 +154,12 @@ export const internalRouter = async (session: string | undefined) => {
     }
   };
 
-  process.once('SIGINT', stop);
-  process.once('SIGTERM', stop);
+  for (const name of SESSION_SIGNALS) process.on(name, handleStop);
   process.stdin.resume();
   /**
    * Смерть родителя закрывает pipe — даже после SIGKILL.
    */
-  process.stdin.once('end', stop);
+  process.stdin.once('end', handleStop);
   process.stdout.write(JSON.stringify(metadata) + '\n');
 };
 
@@ -150,13 +195,17 @@ export const withRouter = async <T>(
   let failure: Error | undefined;
   const controller = new AbortController();
 
-  const abort = () => {
-    controller.abort();
-    router?.kill('SIGTERM');
+  /**
+   * Сигнал — единственная точка отмены: причина отмены несёт его имя, и `spawnClient` передаёт
+   * клиенту тот же сигнал. Роутер останавливается в `finally`, когда действие завершилось.
+   * Подписка `on`, а не `once`: повторный сигнал не должен убить мост действием по умолчанию до
+   * уборки сессии.
+   */
+  const handleSignal = (signal: NodeJS.Signals) => {
+    controller.abort(signal);
   };
 
-  process.once('SIGTERM', abort);
-  process.once('SIGINT', abort);
+  for (const name of SESSION_SIGNALS) process.on(name, handleSignal);
 
   try {
     const child = spawn(command, args, {
@@ -208,7 +257,7 @@ export const withRouter = async <T>(
 
       const onData = (chunk: Buffer) => {
         output += chunk.toString();
-        if (output.length > 8192)
+        if (output.length > MAX_STARTUP_OUTPUT)
           return finish(new Error('Unexpected CCR startup output'));
         if (!output.includes('\n')) return;
 
@@ -228,7 +277,7 @@ export const withRouter = async <T>(
 
       const timer = setTimeout(() => {
         return finish(new Error('CCR startup timed out'));
-      }, 20000);
+      }, STARTUP_TIMEOUT_MS);
 
       child.stdout.on('data', onData);
       child.once('error', onError);
@@ -245,11 +294,11 @@ export const withRouter = async <T>(
      */
     child.stdout.resume();
 
-    const died = () => {
+    const handleRouterExit = () => {
       return controller.abort(new Error('Router exited'));
     };
 
-    child.once('exit', died);
+    child.once('exit', handleRouterExit);
 
     try {
       return await action({
@@ -261,20 +310,14 @@ export const withRouter = async <T>(
         signal: controller.signal,
       });
     } finally {
-      child.removeListener('exit', died);
+      child.removeListener('exit', handleRouterExit);
     }
   } finally {
-    process.removeListener('SIGTERM', abort);
-    process.removeListener('SIGINT', abort);
+    for (const name of SESSION_SIGNALS) process.removeListener(name, handleSignal);
 
     if (router && router.exitCode === null && router.signalCode === null && !failure) {
-      router.kill('SIGTERM');
-      await Promise.race([exited, sleep(2200)]);
-
-      if (router.exitCode === null && router.signalCode === null) {
-        router.kill('SIGKILL');
-        await exited;
-      }
+      signalWithEscalation(router, 'SIGTERM', ROUTER_STOP_GRACE_MS);
+      await exited;
     }
 
     fs.rmSync(session, { recursive: true, force: true });
@@ -294,33 +337,22 @@ export const spawnClient = (
     }
 
     const child = spawn(command, args, { env, stdio: 'inherit' });
-    let killTimer: NodeJS.Timeout | undefined;
 
-    const terminate = () => {
-      return child.kill('SIGTERM');
+    /**
+     * Отмена сигналом передаёт клиенту тот же сигнал; смерть роутера — SIGTERM.
+     */
+    const handleAbort = () => {
+      signalWithEscalation(
+        child,
+        isSessionSignal(signal?.reason) ? signal.reason : 'SIGTERM',
+        KILL_GRACE_MS
+      );
     };
 
-    const interrupt = () => {
-      return child.kill('SIGINT');
-    };
-
-    const force = () => {
-      terminate();
-      killTimer = setTimeout(() => {
-        return child.kill('SIGKILL');
-      }, 2000);
-      killTimer.unref();
-    };
-
-    signal?.addEventListener('abort', force, { once: true });
-    process.once('SIGTERM', terminate);
-    process.once('SIGINT', interrupt);
+    signal?.addEventListener('abort', handleAbort, { once: true });
 
     const cleanup = () => {
-      clearTimeout(killTimer);
-      process.removeListener('SIGTERM', terminate);
-      process.removeListener('SIGINT', interrupt);
-      signal?.removeEventListener('abort', force);
+      signal?.removeEventListener('abort', handleAbort);
     };
 
     child.once('error', (error: NodeJS.ErrnoException) => {
@@ -337,9 +369,11 @@ export const spawnClient = (
       cleanup();
       /**
        * Код 0 — успех клиента, а не «кода нет»: `||` превратил бы его в код сигнала. null — процесс
-       * убит сигналом.
+       * убит сигналом: код по конвенции shell, 128 + номер сигнала.
        */
-      resolve(code ?? (sig === 'SIGTERM' ? 143 : 130));
+      resolve(
+        code ?? 128 + (sig ? os.constants.signals[sig] : os.constants.signals.SIGTERM)
+      );
     });
   });
 };

@@ -1,6 +1,4 @@
-import crypto from 'node:crypto';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 
 import packageJson from '../package.json' with { type: 'json' };
@@ -39,9 +37,7 @@ const PLUGIN_COMMANDS = {
   },
 };
 
-const claudeConfigDir = () => {
-  return process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
-};
+const SETTINGS_PREFIX = '--settings=';
 
 const shellQuote = (value: string) => {
   return `'${value.replaceAll("'", String.raw`'\''`)}'`;
@@ -78,7 +74,7 @@ export const extractSettings = (args: string[]): ExtractedSettings => {
     if (arg === '--settings') {
       value = args[++i];
       if (value === undefined) throw new Error('Missing value for --settings');
-    } else if (arg.startsWith('--settings=')) value = arg.slice(11);
+    } else if (arg.startsWith(SETTINGS_PREFIX)) value = arg.slice(SETTINGS_PREFIX.length);
     else rest.push(arg);
   }
 
@@ -211,7 +207,7 @@ export const prepareClient = ({
     ...flagSettings,
     modelPicker: flagSettings?.modelPicker || modelPicker(active.model),
   };
-  const statusLine = resolveStatusLine(flagSettings, cwd, claudeConfigDir());
+  const statusLine = resolveStatusLine(flagSettings, cwd, state.claudeConfigDir());
 
   if (statusLine) {
     state.writeJson(path.join(session, STATUS_LINE_FILE), statusLine);
@@ -264,7 +260,7 @@ export const prepareClient = ({
 };
 
 export const snapshotUserModel = (
-  file = path.join(claudeConfigDir(), 'settings.json')
+  file = path.join(state.claudeConfigDir(), 'settings.json')
 ): UserModelSnapshot | undefined => {
   if (!fs.existsSync(file)) return { file, hasModel: false };
   const settings = readSettingsFile(file);
@@ -297,18 +293,10 @@ export const restoreUserModel = (snapshot: UserModelSnapshot | undefined) => {
 
   if (snapshot.hasModel) next.model = snapshot.model;
   else delete next.model;
-  const { mode } = fs.statSync(snapshot.file);
-  const temporary = `${snapshot.file}.${process.pid}.${crypto.randomBytes(8).toString('hex')}.tmp`;
-
-  try {
-    fs.writeFileSync(temporary, JSON.stringify(next, null, 2) + '\n', {
-      mode: mode & 0o777,
-      flag: 'wx',
-    });
-    fs.renameSync(temporary, snapshot.file);
-  } finally {
-    fs.rmSync(temporary, { force: true });
-  }
+  /**
+   * Права файла пользователя сохраняются; симлинк на dotfiles остаётся симлинком (`writeJson`).
+   */
+  state.writeJson(snapshot.file, next, { mode: fs.statSync(snapshot.file).mode & 0o777 });
 
   return `Restored "model" in ${snapshot.file}: ${replaced} -> ${snapshot.hasModel ? JSON.stringify(snapshot.model) : '(unset)'}. Use "s" in /model to switch only the current session.`;
 };

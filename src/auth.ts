@@ -6,7 +6,17 @@ import type { JwtClaims, LoginOptions, TokenExchange } from './auth.types';
 import * as state from './state';
 
 const CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
-const REDIRECT_URI = 'http://localhost:1455/auth/callback';
+
+/**
+ * Порт колбэка, зарегистрированный у OAuth-клиента Codex: redirect URI строится из фактического
+ * порта, и другой порт (тесты слушают на нулевом) годится только с моком token endpoint.
+ */
+const CALLBACK_PORT = 1455;
+const CALLBACK_PATH = '/auth/callback';
+
+const redirectUri = (port: number) => {
+  return `http://localhost:${port}${CALLBACK_PATH}`;
+};
 
 const claims = (token: string | undefined): JwtClaims => {
   try {
@@ -59,7 +69,7 @@ export const validTokens = async () => {
 };
 
 export const login = async ({
-  port = 1455,
+  port = CALLBACK_PORT,
   onUrl = (url) => {
     return console.log(`Open this URL in your browser (valid for 5 minutes):\n${url}`);
   },
@@ -70,21 +80,10 @@ export const login = async ({
   state.ensureState();
   const verifier = crypto.randomBytes(48).toString('base64url');
   const nonce = crypto.randomBytes(32).toString('base64url');
-  const url = new URL('https://auth.openai.com/oauth/authorize');
-
-  url.search = new URLSearchParams({
-    response_type: 'code',
-    client_id: CLIENT_ID,
-    redirect_uri: REDIRECT_URI,
-    scope:
-      'openid profile email offline_access api.connectors.read api.connectors.invoke',
-    code_challenge: crypto.createHash('sha256').update(verifier).digest('base64url'),
-    code_challenge_method: 'S256',
-    state: nonce,
-    originator: 'codex_cli_rs',
-    codex_cli_simplified_flow: 'true',
-    id_token_add_organizations: 'true',
-  }).toString();
+  /**
+   * Задаётся после listen: redirect URI — с портом, который реально слушает сервер.
+   */
+  let redirect = redirectUri(port);
   const {
     promise: done,
     resolve: finish,
@@ -99,9 +98,21 @@ export const login = async ({
   const controller = new AbortController();
   const server = http.createServer(async (request, response) => {
     response.setHeader('Cache-Control', 'no-store');
-    const callback = new URL(request.url || '/', 'http://localhost');
+    let callback: URL;
 
-    if (request.method !== 'GET' || callback.pathname !== '/auth/callback') {
+    try {
+      callback = new URL(request.url || '/', 'http://localhost');
+    } catch {
+      /**
+       * Битый request-target (`//`) — не наш колбэк: отвечаем 400 и ждём настоящий. Исключение
+       * из обработчика уронило бы процесс логина.
+       */
+      response.writeHead(400).end();
+
+      return;
+    }
+
+    if (request.method !== 'GET' || callback.pathname !== CALLBACK_PATH) {
       response.writeHead(404).end();
 
       return;
@@ -144,7 +155,7 @@ export const login = async ({
           grant_type: 'authorization_code',
           client_id: CLIENT_ID,
           code,
-          redirect_uri: REDIRECT_URI,
+          redirect_uri: redirect,
           code_verifier: verifier,
         }),
         signal: AbortSignal.any([controller.signal, AbortSignal.timeout(30000)]),
@@ -217,6 +228,22 @@ export const login = async ({
 
     if (!address || typeof address === 'string')
       throw new Error('OAuth callback is not listening');
+    redirect = redirectUri(address.port);
+    const url = new URL('https://auth.openai.com/oauth/authorize');
+
+    url.search = new URLSearchParams({
+      response_type: 'code',
+      client_id: CLIENT_ID,
+      redirect_uri: redirect,
+      scope:
+        'openid profile email offline_access api.connectors.read api.connectors.invoke',
+      code_challenge: crypto.createHash('sha256').update(verifier).digest('base64url'),
+      code_challenge_method: 'S256',
+      state: nonce,
+      originator: 'codex_cli_rs',
+      codex_cli_simplified_flow: 'true',
+      id_token_add_organizations: 'true',
+    }).toString();
     if (signal?.aborted) abort();
     else await onUrl(url.toString(), address);
     await done;

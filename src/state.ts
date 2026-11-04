@@ -9,6 +9,7 @@ import type {
   Settings,
   SettingsInput,
   SettingsOverrides,
+  WriteJsonOptions,
 } from './state.types';
 
 export const runtime = path.resolve(
@@ -77,8 +78,21 @@ export const fitEffort = (model: string, effort: unknown): string | undefined =>
     });
 };
 
+/**
+ * Каталог конфигурации Claude Code: `CLAUDE_CONFIG_DIR` или `~/.claude` — так же его ищет сам
+ * клиент.
+ */
+export const claudeConfigDir = () => {
+  return process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
+};
+
+const isRecord = (value: unknown): value is Record<string, unknown> => {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+};
+
 const validate = (value: SettingsInput): Settings => {
-  const model = String(value.model || '').replace(/^codex,/, '');
+  const raw = String(value.model || '');
+  const model = raw.startsWith(CLIENT_PREFIX) ? raw.slice(CLIENT_PREFIX.length) : raw;
   const { reasoningEffort } = value;
 
   if (!isModelId(model)) throw new Error('Expected a GPT model ID, such as gpt-6.1-sol');
@@ -92,25 +106,56 @@ export const ensureState = () => {
   fs.mkdirSync(runtime, { recursive: true, mode: 0o700 });
 };
 
-export const writeJson = (file: string, data: unknown) => {
-  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-  const temporary = `${file}.${process.pid}.${crypto.randomBytes(8).toString('hex')}.tmp`;
+/**
+ * Атомарная запись JSON: временный файл рядом с целью и `rename`. Путь-симлинк (dotfiles через
+ * stow или chezmoi) разрешается до записи: `rename` поверх самого симлинка отвязал бы файл от
+ * его цели.
+ */
+export const writeJson = (
+  file: string,
+  data: unknown,
+  { mode = 0o600 }: WriteJsonOptions = {}
+) => {
+  const target = fs.existsSync(file) ? fs.realpathSync(file) : file;
+
+  fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+  const temporary = `${target}.${process.pid}.${crypto.randomBytes(8).toString('hex')}.tmp`;
 
   try {
     fs.writeFileSync(temporary, JSON.stringify(data, null, 2) + '\n', {
-      mode: 0o600,
+      mode,
       flag: 'wx',
     });
-    fs.renameSync(temporary, file);
+    fs.renameSync(temporary, target);
   } finally {
     fs.rmSync(temporary, { force: true });
   }
 };
 
+/**
+ * JSON-объект из файла state; битый файл — ошибка с путём и подсказкой, а не голый `SyntaxError`.
+ */
+const readStateObject = (file: string, hint: string): Record<string, unknown> => {
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (error) {
+    throw new Error(`Cannot read ${file}: ${hint}`, { cause: error });
+  }
+
+  if (!isRecord(parsed)) throw new Error(`Cannot read ${file}: ${hint}`);
+
+  return parsed;
+};
+
 export const readSettings = (): Settings => {
   return validate(
     fs.existsSync(settingsFile)
-      ? JSON.parse(fs.readFileSync(settingsFile, 'utf8'))
+      ? readStateObject(
+          settingsFile,
+          'expected a JSON object; fix it or run: claude-codex settings reset'
+        )
       : defaults
   );
 };
@@ -164,22 +209,16 @@ export const readModelsCache = (): ModelsCache => {
 };
 
 export const requireAuth = (): AuthFile => {
-  let auth;
+  if (!fs.existsSync(authFile))
+    throw new Error('Not authenticated. Run: claude-codex auth login');
+  const auth = readStateObject(authFile, 'run: claude-codex auth login');
+  const { access_token: accessToken } = auth;
 
-  try {
-    auth = JSON.parse(fs.readFileSync(authFile, 'utf8'));
-  } catch (error) {
-    if (error instanceof Error && 'code' in error && error.code === 'ENOENT')
-      throw new Error('Not authenticated. Run: claude-codex auth login', {
-        cause: error,
-      });
-    throw new Error('Cannot read OAuth credentials; run: claude-codex auth login', {
-      cause: error,
-    });
-  }
-
-  if (typeof auth.access_token !== 'string' || !auth.access_token)
+  if (typeof accessToken !== 'string' || !accessToken)
     throw new Error('OAuth access token missing. Run: claude-codex auth login');
 
-  return auth;
+  /**
+   * Обязательное поле проверено выше; остальные необязательны и читаются с проверкой типа.
+   */
+  return { ...auth, access_token: accessToken };
 };

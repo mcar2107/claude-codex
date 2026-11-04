@@ -1,11 +1,44 @@
 #!/usr/bin/env bun
 import packageJson from '../package.json' with { type: 'json' };
 
-import type { ContentBlock } from './cli.types';
+import type { ContentBlock, DoctorResult } from './cli.types';
 import { internalRouter, parseOverrides, spawnClient, withRouter } from './session';
 import * as state from './state';
 
 const { version } = packageJson;
+
+/**
+ * Окружение, которое увело бы клиента мимо роутера сессии или подменило бы его модель: ключ
+ * Anthropic, провайдеры Bedrock, Vertex и Foundry, свои заголовки, модель субагентов.
+ * `CLAUDECODE` Claude Code ставит своим дочерним процессам — мост, запущенный из сессии, не должен
+ * передать его дальше.
+ */
+const FOREIGN_CLIENT_ENV = [
+  'ANTHROPIC_API_KEY',
+  'CLAUDECODE',
+  'CLAUDE_CODE_USE_BEDROCK',
+  'CLAUDE_CODE_USE_VERTEX',
+  'CLAUDE_CODE_USE_FOUNDRY',
+  'ANTHROPIC_CUSTOM_HEADERS',
+  'CLAUDE_CODE_SUBAGENT_MODEL',
+];
+
+/**
+ * Тело ответа как JSON; не-JSON (HTML прокси, пустой 502) — `undefined`, а не `SyntaxError`.
+ */
+const readJson = async (response: Response): Promise<unknown> => {
+  const text = await response.text();
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+};
+
+const isDoctorResult = (value: unknown): value is DoctorResult => {
+  return typeof value === 'object' && value !== null;
+};
 
 const help = () => {
   console.log(
@@ -38,13 +71,14 @@ const doctor = async (args: string[]) => {
       }),
       signal: AbortSignal.any([signal, AbortSignal.timeout(130000)]),
     });
-    const result = await response.json();
+    const result = await readJson(response);
 
-    if (!response.ok || result.error)
+    if (!response.ok || !isDoctorResult(result) || result.error)
       throw new Error(
-        `Upstream check failed (HTTP ${response.status}): ${result.error?.type || 'provider_error'}`
+        `Upstream check failed (HTTP ${response.status}): ${(isDoctorResult(result) && result.error?.type) || 'provider_error'}`
       );
-    const answer = (result.content || []).reduce((text: string, item: ContentBlock) => {
+    const content = Array.isArray(result.content) ? result.content : [];
+    const answer = content.reduce((text: string, item: ContentBlock) => {
       return item.type === 'text' ? text + (item.text || '') : text;
     }, '');
 
@@ -81,16 +115,7 @@ const launch = (args: string[]) => {
     console.error(
       `${active.model} ${active.reasoningEffort} via Codex OAuth. Switch with /model and /effort; claude-codex settings are defaults for new sessions.`
     );
-    for (const name of [
-      'ANTHROPIC_API_KEY',
-      'CLAUDECODE',
-      'CLAUDE_CODE_USE_BEDROCK',
-      'CLAUDE_CODE_USE_VERTEX',
-      'CLAUDE_CODE_USE_FOUNDRY',
-      'ANTHROPIC_CUSTOM_HEADERS',
-      'CLAUDE_CODE_SUBAGENT_MODEL',
-    ])
-      delete env[name];
+    for (const name of FOREIGN_CLIENT_ENV) delete env[name];
     env.ANTHROPIC_BASE_URL = base;
     env.ANTHROPIC_AUTH_TOKEN = key;
     const { isClientModel, prepareClient, restoreUserModel, snapshotUserModel } =
@@ -109,9 +134,18 @@ const launch = (args: string[]) => {
         { env, signal }
       );
     } finally {
-      const restored = restoreUserModel(snapshot);
+      /**
+       * Сбой восстановления не должен подменить код выхода клиента: только предупреждение.
+       */
+      try {
+        const restored = restoreUserModel(snapshot);
 
-      if (restored) console.error(restored);
+        if (restored) console.error(restored);
+      } catch (error) {
+        console.error(
+          `Warning: could not restore "model" in ${snapshot?.file}: ${error instanceof Error ? error.message : error}`
+        );
+      }
     }
   });
 };

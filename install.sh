@@ -69,7 +69,8 @@ echo "Downloading claude-codex $version ($os-$arch)..."
 curl -fsSL -o "$temp/$name.tar.gz" "$base/$name.tar.gz" || fail "could not download $base/$name.tar.gz"
 curl -fsSL -o "$temp/SHA256SUMS" "$base/SHA256SUMS" || fail "could not download $base/SHA256SUMS"
 
-expected=$(grep " $name.tar.gz\$" "$temp/SHA256SUMS" | cut -d' ' -f1)
+# Имя сравнивается целиком, а не регэкспом: точка в имени не должна совпадать с любым символом.
+expected=$(awk -v file="$name.tar.gz" '$2 == file || $2 == "*" file { print $1; exit }' "$temp/SHA256SUMS")
 [ -n "$expected" ] || fail "no checksum for $name.tar.gz in SHA256SUMS"
 [ "$(sha256 "$temp/$name.tar.gz")" = "$expected" ] || fail 'checksum mismatch; aborting'
 

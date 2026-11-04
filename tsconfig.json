@@ -22,5 +22,11 @@
       "@caeliq/ccr-shared": ["./src/transport/shared.ts"]
     }
   },
-  "include": ["*.ts", "src/**/*.ts", "scripts/**/*.ts", "tests/**/*.ts"]
+  "include": [
+    "*.ts",
+    "src/**/*.ts",
+    "scripts/**/*.ts",
+    "tests/**/*.ts",
+    ".claude/hooks/*.ts"
+  ]
 }

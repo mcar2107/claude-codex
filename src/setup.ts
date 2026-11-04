@@ -1,6 +1,7 @@
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
+
+import * as state from './state';
 
 /**
  * Команды сессии приходят плагином `--plugin-dir` (`src/client.ts`); `setup --remove` удаляет
@@ -12,10 +13,7 @@ export const setup = (args: string[]) => {
     throw new Error(
       'Session commands are built in (/codex:settings, /codex:models). Usage: claude-codex setup --remove'
     );
-  const directory = path.join(
-    process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'),
-    'commands'
-  );
+  const directory = path.join(state.claudeConfigDir(), 'commands');
   const files = Object.entries({
     'codex-settings': '$ARGUMENTS',
     'codex-model': 'set --model $ARGUMENTS',

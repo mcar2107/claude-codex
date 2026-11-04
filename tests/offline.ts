@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -116,7 +117,7 @@ try {
 
   assert.throws(() => {
     return state.saveSettings({ model: 'gpt-6.1-sol', reasoningEffort: 'none' });
-  });
+  }, /supported effort levels/);
   assert.equal(fs.readFileSync(state.settingsFile, 'utf8'), before);
   assert.equal(fs.statSync(state.settingsFile).mode & 0o777, 0o600);
   const { parseOverrides } = await import('../src/session');
@@ -130,14 +131,27 @@ try {
   );
   assert.throws(() => {
     return parseOverrides(['--model=']);
-  });
+  }, /--model/);
   assert.equal(
     state.activeSettings({ reasoningEffort: 'low' }, { CLAUDE_CODEX_EFFORT: 'high' })
       .reasoningEffort,
     'low'
   );
+  fs.writeFileSync(state.settingsFile, 'null');
+  assert.throws(
+    () => {
+      return state.readSettings();
+    },
+    new RegExp(`Cannot read ${state.settingsFile}.*settings reset`)
+  );
+  fs.writeFileSync(state.settingsFile, before);
+  const { settings } = await import('../src/settings');
+
+  assert.throws(() => {
+    return settings(['preset', 'constructor']);
+  }, /Unknown preset\. Choose sol\|balanced\|fast\|max/);
   console.log(
-    'PASS: defaults, atomic private settings, future IDs, effort validation and overrides.'
+    'PASS: defaults, atomic private settings, readable errors for a broken settings file, future IDs, effort validation, presets and overrides.'
   );
   state.writeJson(state.authFile, fresh);
   let captured: CapturedRequest | undefined;
@@ -151,9 +165,9 @@ try {
       String(url).includes('chatgpt.com/backend-api/codex/responses'),
       `Unexpected network: ${url}`
     );
-    const request: CapturedRequest = JSON.parse(String(opts?.body));
+    const upstreamRequest: CapturedRequest = JSON.parse(String(opts?.body));
 
-    captured = request;
+    captured = upstreamRequest;
     if (upstreamError)
       return new Response(
         JSON.stringify({
@@ -161,10 +175,10 @@ try {
         }),
         { status: upstreamError, headers: { 'Content-Type': 'application/json' } }
       );
-    const response = upstreamResponse(request.model, output);
-    const probe = cancellationProbe;
+    const response = upstreamResponse(upstreamRequest.model, output);
+    const cancellation = cancellationProbe;
 
-    if (probe) {
+    if (cancellation) {
       const { promise: opened, resolve: onOpen } =
         Promise.withResolvers<ReadableStreamDefaultController<Uint8Array>>();
       const stream = new ReadableStream<Uint8Array>({
@@ -174,7 +188,7 @@ try {
           onOpen(controller);
         },
         cancel() {
-          probe.isCancelled = true;
+          cancellation.isCancelled = true;
         },
       });
       const controller = await opened;
@@ -182,7 +196,7 @@ try {
       opts?.signal?.addEventListener(
         'abort',
         () => {
-          probe.isAborted = true;
+          cancellation.isAborted = true;
 
           try {
             controller.error(new DOMException('Aborted', 'AbortError'));
@@ -212,6 +226,11 @@ try {
 
   const limitsFile = path.join(fixture, 'session-test', 'rate-limits.json');
   const requestFile = path.join(fixture, 'session-test', 'last-request.json');
+
+  /**
+   * Настройки сессии — снимок на старте роутера: сохранённые после него сессию не меняют.
+   */
+  state.saveSettings({ model: 'gpt-6-luna', reasoningEffort: 'low' });
   const app = await createRouter({ key: 'test-key', limitsFile, requestFile });
   const headers = { 'x-api-key': 'test-key', 'anthropic-version': '2023-06-01' };
   const request = {
@@ -226,6 +245,10 @@ try {
         input_schema: { type: 'object', properties: { path: { type: 'string' } } },
       },
     ],
+  };
+
+  const post = (payload: object) => {
+    return app.inject({ method: 'POST', url: '/v1/messages', headers, payload });
   };
 
   try {
@@ -243,8 +266,14 @@ try {
 
     assert.equal(counted.statusCode, 200, counted.body);
     assert(counted.json().input_tokens > 0);
+    const uncounted = await app.inject({
+      method: 'POST',
+      url: '/v1/messages/count_tokens',
+      headers,
+    });
 
-    state.saveSettings({ model: 'gpt-6-luna', reasoningEffort: 'low' });
+    assert.equal(uncounted.statusCode, 400, 'count_tokens without a body');
+    state.saveSettings({ model: 'gpt-5.5', reasoningEffort: 'high' });
 
     for (const [model, reasoningEffort] of [
       ['gpt-6.1-sol', 'xhigh'],
@@ -253,15 +282,10 @@ try {
       ['gpt-6-luna', 'high'],
       ['gpt-future-test', 'high'],
     ]) {
-      const result = await app.inject({
-        method: 'POST',
-        url: '/v1/messages',
-        headers,
-        payload: {
-          ...request,
-          model: `codex,${model}`,
-          output_config: { effort: reasoningEffort },
-        },
+      const result = await post({
+        ...request,
+        model: `codex,${model}`,
+        output_config: { effort: reasoningEffort },
       });
       const sent = lastRequest();
 
@@ -281,23 +305,18 @@ try {
     }
 
     /**
-     * Не модель Codex и без effort — модель и уровень из настроек моста.
+     * Не модель Codex и без effort — стартовые модель и уровень сессии, хотя сохранённые настройки
+     * с тех пор сменились.
      */
-    const fallback = await app.inject({
-      method: 'POST',
-      url: '/v1/messages',
-      headers,
-      payload: { ...request, model: 'claude-haiku-4-5' },
-    });
+    const fallback = await post({ ...request, model: 'claude-haiku-4-5' });
 
     assert.equal(fallback.statusCode, 200, fallback.body);
     assert.equal(lastRequest().model, 'gpt-6-luna');
     assert.equal(lastRequest().reasoning.effort, 'low');
-    const clamped = await app.inject({
-      method: 'POST',
-      url: '/v1/messages',
-      headers,
-      payload: { ...request, model: 'codex,gpt-5.5', output_config: { effort: 'max' } },
+    const clamped = await post({
+      ...request,
+      model: 'codex,gpt-5.5',
+      output_config: { effort: 'max' },
     });
 
     assert.equal(clamped.statusCode, 200, clamped.body);
@@ -323,20 +342,41 @@ try {
     assert.deepEqual(lastRecord.client, { model: 'codex,gpt-5.5', effort: 'max' });
     assert.deepEqual(lastRecord.upstream, { model: 'gpt-5.5', effort: 'xhigh' });
     assert.equal(lastRecord.returnedModel, 'gpt-5.5', 'model from the Codex response');
-    process.env.CLAUDE_CODEX_MODEL = 'gpt-6-astra';
+    /**
+     * Сессия с `--effort max`: сохранённая позже модель без `max` не должна ронять её запросы.
+     */
+    state.saveSettings({ model: 'gpt-6-luna', reasoningEffort: 'low' });
     process.env.CLAUDE_CODEX_EFFORT = 'max';
-    const overridden = await app.inject({
-      method: 'POST',
-      url: '/v1/messages',
-      headers,
-      payload: { ...request, model: 'sonnet' },
-    });
+    const overrideApp = await createRouter({ key: 'test-key' });
 
-    assert.equal(overridden.statusCode, 200);
-    assert.equal(lastRequest().model, 'gpt-6-astra');
-    assert.equal(lastRequest().reasoning.effort, 'max');
-    delete process.env.CLAUDE_CODEX_MODEL;
     delete process.env.CLAUDE_CODEX_EFFORT;
+
+    try {
+      state.saveSettings({ model: 'gpt-5.5', reasoningEffort: 'high' });
+
+      const postOverride = (payload: object) => {
+        return overrideApp.inject({
+          method: 'POST',
+          url: '/v1/messages',
+          headers,
+          payload,
+        });
+      };
+
+      const overridden = await postOverride({ ...request, model: 'sonnet' });
+
+      assert.equal(overridden.statusCode, 200, overridden.body);
+      assert.equal(lastRequest().model, 'gpt-6-luna');
+      assert.equal(lastRequest().reasoning.effort, 'max');
+      const selected = await postOverride(request);
+
+      assert.equal(selected.statusCode, 200, selected.body);
+      assert.equal(lastRequest().model, 'gpt-6.1-sol');
+      assert.equal(lastRequest().reasoning.effort, 'max');
+    } finally {
+      await overrideApp.close();
+    }
+
     assert(!fs.existsSync(limitsFile), 'no Codex limit headers, no snapshot');
     const now = Math.floor(Date.now() / 1000);
 
@@ -348,12 +388,7 @@ try {
       'x-codex-secondary-window-minutes': '10080',
       'x-codex-secondary-reset-after-seconds': '86400',
     };
-    const limited = await app.inject({
-      method: 'POST',
-      url: '/v1/messages',
-      headers,
-      payload: request,
-    });
+    const limited = await post(request);
 
     assert.equal(limited.statusCode, 200, limited.body);
     const snapshot = JSON.parse(fs.readFileSync(limitsFile, 'utf8'));
@@ -375,12 +410,7 @@ try {
         arguments: '{"path":"a.txt"}',
       },
     ];
-    const tool = await app.inject({
-      method: 'POST',
-      url: '/v1/messages',
-      headers,
-      payload: request,
-    });
+    const tool = await post(request);
 
     assert.equal(tool.statusCode, 200, tool.body);
     const call = tool.json().content.find((item: ContentBlock) => {
@@ -404,21 +434,11 @@ try {
         },
       ],
     };
-    const followupResult = await app.inject({
-      method: 'POST',
-      url: '/v1/messages',
-      headers,
-      payload: followup,
-    });
+    const followupResult = await post(followup);
 
     assert.equal(followupResult.statusCode, 200, followupResult.body);
     assert(JSON.stringify(lastRequest().input).includes('file contents'));
-    const streamed = await app.inject({
-      method: 'POST',
-      url: '/v1/messages',
-      headers,
-      payload: { ...request, stream: true },
-    });
+    const streamed = await post({ ...request, stream: true });
 
     assert.equal(streamed.statusCode, 200, streamed.body);
     assert(streamed.body.includes('message_start'));
@@ -437,17 +457,12 @@ try {
 
     assert.equal(deltas, 'ok');
     upstreamError = 400;
-    const bad = await app.inject({
-      method: 'POST',
-      url: '/v1/messages',
-      headers,
-      payload: request,
-    });
+    const bad = await post(request);
 
     assert(bad.statusCode >= 400, bad.body);
     upstreamError = undefined;
     console.log(
-      'PASS: actual source-backed CCR, client-selected model/effort for 5 IDs, settings fallback, effort clamping, overrides, Codex limit snapshot, last request record with the returned model, Responses Lite, tools/results, incremental SSE, auth and provider errors (mock upstream).'
+      'PASS: actual source-backed CCR, client-selected model/effort for 5 IDs, startup settings fallback unaffected by later saves, effort clamping, overrides, count_tokens validation, Codex limit snapshot, last request record with the returned model, Responses Lite, tools/results, incremental SSE, auth and provider errors (mock upstream).'
     );
     const probe: CancellationProbe = { isAborted: false, isCancelled: false };
 
@@ -496,7 +511,30 @@ try {
       const parsed = new URL(url);
 
       assert.equal(parsed.searchParams.get('code_challenge_method'), 'S256');
+      assert.equal(
+        parsed.searchParams.get('redirect_uri'),
+        `http://localhost:${address.port}/auth/callback`
+      );
       const base = `http://127.0.0.1:${address.port}/auth/callback`;
+      /**
+       * Битый request-target не должен уронить логин: ответ 400, колбэк ждётся дальше.
+       */
+      const malformed = await new Promise<string>((resolve, reject) => {
+        const socket = net.connect(address.port, '127.0.0.1', () => {
+          socket.end('GET // HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n');
+        });
+        let reply = '';
+
+        socket.on('data', (chunk) => {
+          reply += chunk;
+        });
+        socket.once('end', () => {
+          return resolve(reply);
+        });
+        socket.once('error', reject);
+      });
+
+      assert.match(malformed, /^HTTP\/1\.1 400/);
 
       assert.equal((await originalFetch(`${base}?code=fake&state=wrong`)).status, 400);
       assert.equal(
@@ -526,7 +564,7 @@ try {
   assert.equal(fs.statSync(state.authFile).mode & 0o777, 0o600);
   await assert.rejects(login({ port: 0, timeout: 20, onUrl: () => {} }), /timed out/);
   console.log(
-    'PASS: clean PKCE OAuth, invalid state, private token storage and timeout cleanup (mock token endpoint).'
+    'PASS: clean PKCE OAuth, redirect URI from the listening port, malformed and invalid-state callbacks, private token storage and timeout cleanup (mock token endpoint).'
   );
   /**
    * Тот же хелпер обновления, что у настоящего трансформера, — без настоящих токенов.
@@ -775,8 +813,22 @@ try {
   fs.writeFileSync(noModel, JSON.stringify({ model: 'codex,gpt-6-astra' }));
   client.restoreUserModel(emptySnapshot);
   assert.deepEqual(JSON.parse(fs.readFileSync(noModel, 'utf8')), {});
+  /**
+   * Настройки из dotfiles: восстановление пишет в цель симлинка, симлинк остаётся.
+   */
+  const dotfile = path.join(fixture, 'dotfiles-settings.json');
+  const linked = path.join(fixture, 'linked-settings.json');
+
+  fs.writeFileSync(dotfile, JSON.stringify({ model: 'opus' }));
+  fs.symlinkSync(dotfile, linked);
+  const linkedSnapshot = client.snapshotUserModel(linked);
+
+  fs.writeFileSync(dotfile, JSON.stringify({ model: 'codex,gpt-6-luna' }));
+  client.restoreUserModel(linkedSnapshot);
+  assert(fs.lstatSync(linked).isSymbolicLink(), 'the symlink survives');
+  assert.equal(JSON.parse(fs.readFileSync(dotfile, 'utf8')).model, 'opus');
   console.log(
-    'PASS: a Codex model saved by /model is restored in user settings on exit; foreign edits are kept.'
+    'PASS: a Codex model saved by /model is restored in user settings on exit, through a symlink; foreign edits are kept.'
   );
 } finally {
   fs.rmSync(fixture, { recursive: true, force: true });

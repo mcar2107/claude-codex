@@ -3,6 +3,10 @@
   "entry": [
     "src/cli.ts",
     "scripts/*.ts",
+    /**
+     * PostToolUse-хук Claude Code: его запускает `.claude/settings.json`.
+     */
+    ".claude/hooks/lint.ts",
     "tests/offline.ts",
     /**
      * Адаптер для vendor/ccr: эти файлы подставляет плагин scripts/build.ts вместо модулей upstream
@@ -18,7 +22,13 @@
      */
     "src/transport/tiktoken.types.ts",
   ],
-  "project": ["*.ts", "src/**/*.ts", "scripts/**/*.ts", "tests/**/*.ts"],
+  "project": [
+    "*.ts",
+    "src/**/*.ts",
+    "scripts/**/*.ts",
+    "tests/**/*.ts",
+    ".claude/hooks/*.ts",
+  ],
   "ignoreDependencies": [
     /**
      * Зависимости исходников vendor/ccr: в бандл их тянет код upstream, который Knip не разбирает.

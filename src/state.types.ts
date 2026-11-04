@@ -97,3 +97,10 @@ export type AuthFile = {
    */
   last_refresh?: number;
 };
+
+export type WriteJsonOptions = {
+  /**
+   * Права нового файла; по умолчанию `0600` — файлы state приватные.
+   */
+  mode?: number;
+};

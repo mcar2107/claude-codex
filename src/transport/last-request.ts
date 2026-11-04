@@ -45,7 +45,12 @@ export const probeResponseModel = async (
   const decoder = new TextDecoder();
 
   const cancel = () => {
-    reader.cancel().catch(() => {});
+    reader.cancel().catch(() => {
+      /**
+       * Отмена копии стрима — уборка: поток уже закрыт или упал, и ответ клиента от неё не
+       * зависит.
+       */
+    });
   };
 
   signal?.addEventListener('abort', cancel, { once: true });

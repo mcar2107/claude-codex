@@ -16,6 +16,30 @@ const root = path.resolve(import.meta.dirname, '..');
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-codex-e2e-'));
 
 /**
+ * Дедлайн одного запуска моста: зависший запуск снимается сигналом, а тест падает с его выводом,
+ * а не держит раннер.
+ */
+const RUN_TIMEOUT_MS = 60_000;
+
+/**
+ * Сколько мост ждёт штатного выхода после SIGTERM до SIGKILL.
+ */
+const KILL_GRACE_MS = 5000;
+
+/**
+ * Входы standalone-сборки: бинарник старше любого из них собран из другого кода.
+ */
+const STANDALONE_INPUTS = [
+  'src',
+  'vendor/ccr',
+  'scripts/build.ts',
+  'scripts/licenses.ts',
+  'scripts/standalone.ts',
+  'package.json',
+  'bun.lock',
+];
+
+/**
  * Фейковый клиент Claude: пишет адрес роутера и ответ count_tokens в файл `--record`; с `--hold`
  * живёт до SIGTERM. Проверяет, что мост вычистил чужие учётные данные из окружения, передал
  * плагин сессии и положил `claude-codex` в PATH.
@@ -105,6 +129,52 @@ const start = (command: string, args: string[], env: NodeJS.ProcessEnv) => {
   return { child, done };
 };
 
+/**
+ * Результат запуска не позже `RUN_TIMEOUT_MS`: по дедлайну мост получает SIGTERM (и уносит с
+ * собой роутер и клиента), затем SIGKILL.
+ */
+const finish = async ({ child, done }: ReturnType<typeof start>, label: string) => {
+  let isTimedOut = false;
+  let killTimer: NodeJS.Timeout | undefined;
+  const deadline = setTimeout(() => {
+    isTimedOut = true;
+    child.kill('SIGTERM');
+    killTimer = setTimeout(() => {
+      return child.kill('SIGKILL');
+    }, KILL_GRACE_MS);
+  }, RUN_TIMEOUT_MS);
+
+  try {
+    const result = await done;
+
+    if (isTimedOut)
+      throw new Error(`${label} timed out after ${RUN_TIMEOUT_MS} ms\n${result.output}`);
+
+    return result;
+  } finally {
+    clearTimeout(deadline);
+    clearTimeout(killTimer);
+  }
+};
+
+/**
+ * Самое позднее время правки среди входов сборки, мс.
+ */
+const newestInput = () => {
+  return STANDALONE_INPUTS.reduce((newest, input) => {
+    const absolute = path.join(root, input);
+    const files = fs.statSync(absolute).isDirectory()
+      ? fs.readdirSync(absolute, { recursive: true, encoding: 'utf8' }).map((name) => {
+          return path.join(absolute, name);
+        })
+      : [absolute];
+
+    return files.reduce((latest, file) => {
+      return Math.max(latest, fs.statSync(file).mtimeMs);
+    }, newest);
+  }, 0);
+};
+
 const sessions = (state: string) => {
   return fs.readdirSync(state).filter((name) => {
     return name.startsWith('session-');
@@ -146,7 +216,7 @@ const exercise = async (cli: string, isStandalone: boolean) => {
   assert(run(cli, ['--version'], { env }).includes(packageJson.version));
   run(cli, ['settings', 'set', '--model', 'gpt-6.1-sol', '--effort', 'high'], { env });
   const one = path.join(state, 'one');
-  const result = await start(cli, ['--record', one], env).done;
+  const result = await finish(start(cli, ['--record', one], env), `${kind} launch`);
 
   assert.equal(result.code, 7, result.output);
   assert(JSON.parse(fs.readFileSync(one + '.tokens', 'utf8')).input_tokens > 0);
@@ -174,7 +244,7 @@ const exercise = async (cli: string, isStandalone: boolean) => {
     assert.notEqual(fs.readFileSync(aFile, 'utf8'), fs.readFileSync(bFile, 'utf8'));
     assert.equal(sessions(state).length, 2);
     a.child.kill('SIGTERM');
-    await a.done;
+    await finish(a, `${kind} session a`);
     assert.equal(b.child.exitCode, null, 'closing one session must not stop another');
     const base = fs.readFileSync(bFile, 'utf8').trim();
 
@@ -185,18 +255,13 @@ const exercise = async (cli: string, isStandalone: boolean) => {
   } finally {
     a.child.kill('SIGTERM');
     b.child.kill('SIGTERM');
-    await Promise.all([a.done, b.done]);
+    await Promise.all([finish(a, `${kind} session a`), finish(b, `${kind} session b`)]);
   }
 
   assert(!sessions(state).length);
 };
 
 try {
-  run(process.execPath, [path.join(root, 'scripts/build.ts')]);
-  await exercise(path.join(root, 'dist/cli.js'), false);
-  console.log(
-    'PASS: bundled CLI launches its own local router + WASM, session plugin and PATH shim, client exit status, concurrent sessions, termination and session cleanup.'
-  );
   const native = path.join(
     root,
     'artifacts',
@@ -204,8 +269,20 @@ try {
     'claude-codex'
   );
 
+  /**
+   * Свежесть проверяется до пересборки бандла: `dist/` ниже — не вход standalone-сборки.
+   */
   if (!fs.existsSync(native))
     throw new Error('Native standalone not built. Run bun run build:standalone first.');
+  if (fs.statSync(native).mtimeMs < newestInput())
+    throw new Error(
+      'Native standalone is older than its sources. Run bun run build:standalone first.'
+    );
+  run(process.execPath, [path.join(root, 'scripts/build.ts')]);
+  await exercise(path.join(root, 'dist/cli.js'), false);
+  console.log(
+    'PASS: bundled CLI launches its own local router + WASM, session plugin and PATH shim, client exit status, concurrent sessions, termination and session cleanup.'
+  );
   const copied = path.join(temp, 'claude-codex');
 
   fs.copyFileSync(native, copied);

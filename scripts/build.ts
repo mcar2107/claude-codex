@@ -16,8 +16,17 @@ const resolve = (file: string) => {
 };
 
 /**
- * Подмены модулей upstream на адаптер `src/transport/` (vendor.md). Те же алиасы повторяет
- * `paths` в tsconfig.json — иначе их не увидит typecheck.
+ * Подмены модулей upstream на адаптер `src/transport/` (vendor.md). Алиасы `@/transformer`, `@/…`
+ * и `@caeliq/ccr-shared` повторяет `paths` в tsconfig.json — иначе их не увидит typecheck.
+ *
+ * Остальные подмены в `paths` не попадают, typecheck проверяет их иначе:
+ *
+ * - `tiktoken` — tsc читает типы самого пакета, а адаптер реэкспортирует его же API;
+ * - `tiktoken-bindings` и `tiktoken-wasm` — виртуальные модули, их объявляет
+ *   `src/transport/tiktoken.types.ts`;
+ * - `./token-count-worker` подменяется только для импорта из `utils/router.ts`, а алиас `paths`
+ *   действовал бы на все импорты; контракт подмены держат типы upstream в
+ *   `src/transport/token-count.ts`.
  */
 export const plugin: BunPlugin = {
   name: 'codex-source-adapter',
@@ -30,10 +39,16 @@ export const plugin: BunPlugin = {
     });
     build.onResolve({ filter: /^@\// }, (args) => {
       const file = path.join(core, args.path.slice(2));
+      const resolved = [file + '.ts', path.join(file, 'index.ts')].find((candidate) => {
+        return fs.existsSync(candidate);
+      });
 
-      return {
-        path: fs.existsSync(file + '.ts') ? file + '.ts' : path.join(file, 'index.ts'),
-      };
+      if (!resolved)
+        throw new Error(
+          `Cannot resolve ${args.path} from ${args.importer}: no ${file}.ts or ${file}/index.ts`
+        );
+
+      return { path: resolved };
     });
     build.onResolve({ filter: /^tiktoken$/ }, () => {
       return { path: resolve('src/transport/tiktoken.ts') };
