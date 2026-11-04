@@ -83,6 +83,7 @@ done
 claude-codex --version > "$record.shim" || exit 84
 [ -z "$CLAUDE_CODE_USE_BEDROCK" ] || exit 89
 [ -z "$ANTHROPIC_API_KEY" ] || exit 88
+[ "$CLAUDE_CODE_AUTO_MODE_SERVER" = 0 ] || exit 83
 [ -n "$record" ] || exit 87
 printf '%s\\n' "$ANTHROPIC_BASE_URL" > "$record"
 /usr/bin/curl -fsS --max-time 10 -H "x-api-key: $ANTHROPIC_AUTH_TOKEN" -H 'Content-Type: application/json' -d '{"messages":[{"role":"user","content":"hello"}]}' "$ANTHROPIC_BASE_URL/v1/messages/count_tokens" > "$record.tokens" || exit 86
@@ -304,6 +305,7 @@ const exercise = async (cli: string, isStandalone: boolean) => {
     CLAUDE_CONFIG_DIR: path.join(temp, `${kind}-claude`),
     CLAUDE_CODEX_STATE_DIR: state,
     CLAUDE_CODE_USE_BEDROCK: '1',
+    CLAUDE_CODE_AUTO_MODE_SERVER: '1',
     ANTHROPIC_API_KEY: 'fake-old-key',
   };
 
@@ -320,6 +322,12 @@ const exercise = async (cli: string, isStandalone: boolean) => {
   const result = await finish(start(cli, ['--record', one], env), `${kind} launch`);
 
   assert.equal(result.code, 7, result.output);
+  assert.equal(env.CLAUDE_CODE_AUTO_MODE_SERVER, '1');
+  /**
+   * Первый запуск перекрывает унаследованное включение; параллельные ниже проверяют запуск
+   * без переменной в окружении родителя.
+   */
+  delete env.CLAUDE_CODE_AUTO_MODE_SERVER;
   assert(JSON.parse(fs.readFileSync(one + '.tokens', 'utf8')).input_tokens > 0);
   assert(fs.readFileSync(one + '.shim', 'utf8').includes(packageJson.version));
   assert(!sessions(state).length, 'session must be cleaned after Claude exit');
