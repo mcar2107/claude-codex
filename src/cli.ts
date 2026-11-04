@@ -48,7 +48,7 @@ const isDoctorResult = (value: unknown): value is DoctorResult => {
 
 const help = () => {
   console.log(
-    `claude-codex ${version} — Claude Code → Codex OAuth\n\nUsage:\n  claude-codex [launch] [--model GPT-ID] [--effort LEVEL] [Claude Code arguments]\n  claude-codex auth login|status\n  claude-codex doctor [--model GPT-ID] [--effort LEVEL]\n  claude-codex settings show|set|reset|preset\n  claude-codex models [refresh]\n  claude-codex setup --remove\n  claude-codex update [vX.Y.Z]\n\nState: ${state.RUNTIME_DIR}\nRequires Bun >=1.4.0 for the bundled CLI and a separately installed Claude Code.\nFlags and saved settings pick the starting model/effort; switch in a session with /model and /effort.\nSession commands: /codex:settings, /codex:models. Use -- to stop parsing bridge flags.\nUse doctor for a real upstream check. Candidate model names do not prove access.`
+    `claude-codex ${version} — Claude Code → Codex OAuth\n\nUsage:\n  claude-codex [launch] [--model GPT-ID] [--effort LEVEL] [Claude Code arguments]\n  claude-codex auth login|status\n  claude-codex doctor [--model GPT-ID] [--effort LEVEL]\n  claude-codex settings show|set|reset|preset\n  claude-codex models [refresh]\n  claude-codex setup --remove\n  claude-codex update [vX.Y.Z]\n\nState: ${state.RUNTIME_DIR}\nRequires Bun >=1.4.0 for the bundled CLI and a separately installed Claude Code.\nFlags and saved settings pick the starting model/effort; switch in a session with /model and /effort.\nSession commands: /codex:settings, /codex:models. Use -- to stop parsing bridge flags.\nupdate replaces this binary; for Claude Code's own update run claude update or claude-codex launch update.\nUse doctor for a real upstream check. Candidate model names do not prove access.`
   );
 };
 

@@ -359,19 +359,29 @@ success from mock tests or a model label alone.
 A release binary updates itself:
 
 ```sh
-claude-codex update           # latest stable release
-claude-codex update v1.0.0    # a specific tag: a prerelease or a downgrade
+claude-codex update                # newest release on the running channel
+claude-codex update v1.1.0-dev.1   # a specific tag: a prerelease or a downgrade
 ```
 
-`update` takes the asset for the running binary's OS and architecture,
-verifies it against the release `SHA256SUMS`, runs the new binary with
-`--version` and only then replaces the executable (symlinks are followed to
-the real file). Any failed check leaves the old binary in place. Running
-sessions keep the previous version until restarted. License notices are
-refreshed in `${CLAUDE_CODEX_SHARE_DIR:-${XDG_DATA_HOME:-~/.local/share}/claude-codex}`
-only if that directory already exists. The bundled CLI (`dist/cli.js`) does not
-update itself: rebuild it from an updated checkout. Re-running the installer
-(or setting `CLAUDE_CODEX_VERSION`) works too. Settings and tokens stay in the
+Without a tag, a stable binary moves to the latest stable release, and a
+prerelease binary to the newest release including prereleases (the installer's
+default). `update` without a tag never downgrades. `update` takes the asset for
+the running binary's OS and architecture, verifies it against the release
+`SHA256SUMS`, runs the new binary with `--version` and only then replaces the
+executable (symlinks are followed to the real file). Any failed check leaves the
+old binary in place. Restart running sessions after an update: their Claude Code
+client and router keep the previous version, but the status line and `/codex:*`
+commands already run the new binary. License notices are refreshed in
+`${CLAUDE_CODEX_SHARE_DIR:-${XDG_DATA_HOME:-~/.local/share}/claude-codex}` only
+if that directory already exists; a failure there is a warning, not a failed
+update.
+
+`claude-codex update` is not passed to Claude Code: run `claude update` or
+`claude-codex launch update` for Claude Code's own update.
+
+The bundled CLI (`dist/cli.js`) does not update itself: rebuild it from an
+updated checkout. Re-running the installer (or setting `CLAUDE_CODEX_VERSION`)
+works too. Settings and tokens stay in the
 external state directory. Review model/transport compatibility before
 upgrading.
 
