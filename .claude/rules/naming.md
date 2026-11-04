@@ -13,7 +13,8 @@ paths:
 4. Булевы переменные и поля — только с префиксами `is`, `has`, `should`. *(см. ниже)*
 5. Короткие, но точные имена: `auth`, `settings`, `router`, а не `data`, `obj`, `tmp`.
 6. Тип параметров функции-объекта — `{FunctionName}Options` (`CreateRouterOptions`).
-7. Имена переменных окружения — `CLAUDE_CODEX_*`.
+7. Имена переменных окружения — `CLAUDE_CODEX_*`. Исключение — `CCR_*`, которые мост выставляет для vendor/ccr
+   (`CCR_CODEX_AUTH_FILE`, `CCR_MODELSDEV_DISABLE`): это имена upstream, их не переименовать.
 
 ---
 

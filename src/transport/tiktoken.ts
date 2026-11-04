@@ -11,4 +11,13 @@ const instance = new WebAssembly.Instance(new WebAssembly.Module(bytes), {
 
 bindings.__wbg_set_wasm(instance.exports);
 
-export * from 'tiktoken-bindings';
+/**
+ * Наружу — ровно API пакета tiktoken (vendor.md, контракт подмен): служебные символы
+ * wasm-bindgen вроде `__wbg_set_wasm` остаются внутри адаптера.
+ */
+export {
+  encoding_for_model,
+  get_encoding,
+  get_encoding_name_for_model,
+  Tiktoken,
+} from 'tiktoken-bindings';

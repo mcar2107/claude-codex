@@ -8,6 +8,11 @@ const bundle = path.join(root, 'dist/offline-tests.js');
 const isStandalone = process.argv.includes('--standalone');
 
 /**
+ * Офлайн-тесты идут секунды; зависший тест не должен подвешивать `bun run test` и pre-commit.
+ */
+const TEST_TIMEOUT_MS = 120_000;
+
+/**
  * Тесты собираются тем же плагином, что и CLI: так они проверяют код с подменами адаптера, а не
  * исходники upstream как есть.
  */
@@ -41,6 +46,7 @@ if (isStandalone) {
 
 const result = spawnSync(command, args, {
   stdio: 'inherit',
+  timeout: TEST_TIMEOUT_MS,
   env: { ...process.env, ...(isStandalone ? { PATH: '/nonexistent' } : {}) },
 });
 

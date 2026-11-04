@@ -116,7 +116,7 @@ export const internalRouter = async (session: string | undefined) => {
     !session ||
     !key ||
     !/^[a-f0-9]{64}$/.test(key) ||
-    !path.resolve(session).startsWith(state.runtime + path.sep)
+    !path.resolve(session).startsWith(state.RUNTIME_DIR + path.sep)
   )
     throw new Error('Internal router requires a private session');
   /**
@@ -182,13 +182,13 @@ export const withRouter = async <T>(
   state.ensureState();
   const env: NodeJS.ProcessEnv = {
     ...process.env,
-    CLAUDE_CODEX_STATE_DIR: state.runtime,
+    CLAUDE_CODEX_STATE_DIR: state.RUNTIME_DIR,
   };
 
   for (const [key, value] of Object.entries(overrides))
     env[key === 'model' ? 'CLAUDE_CODEX_MODEL' : 'CLAUDE_CODEX_EFFORT'] = value;
   const key = crypto.randomBytes(32).toString('hex');
-  const session = fs.mkdtempSync(path.join(state.runtime, 'session-'));
+  const session = fs.mkdtempSync(path.join(state.RUNTIME_DIR, 'session-'));
   const [command, ...args] = selfCommand(['__router', session]);
   let router: ChildProcessByStdio<Writable, Readable, null> | undefined;
   let exited: Promise<unknown> | undefined;
@@ -313,14 +313,20 @@ export const withRouter = async <T>(
       child.removeListener('exit', handleRouterExit);
     }
   } finally {
-    for (const name of SESSION_SIGNALS) process.removeListener(name, handleSignal);
+    /**
+     * Обработчики сигналов снимаются последними: повторный Ctrl-C во время остановки роутера
+     * иначе убил бы мост до удаления каталога сессии.
+     */
+    try {
+      if (router && router.exitCode === null && router.signalCode === null && !failure) {
+        signalWithEscalation(router, 'SIGTERM', ROUTER_STOP_GRACE_MS);
+        await exited;
+      }
 
-    if (router && router.exitCode === null && router.signalCode === null && !failure) {
-      signalWithEscalation(router, 'SIGTERM', ROUTER_STOP_GRACE_MS);
-      await exited;
+      fs.rmSync(session, { recursive: true, force: true });
+    } finally {
+      for (const name of SESSION_SIGNALS) process.removeListener(name, handleSignal);
     }
-
-    fs.rmSync(session, { recursive: true, force: true });
   }
 };
 

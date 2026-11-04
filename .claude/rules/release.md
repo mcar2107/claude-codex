@@ -20,6 +20,6 @@ paths:
    вместе с `licenses/BUN-*-LICENSE.md`.
 5. **Actions — по SHA коммита** с тегом в комментарии; `persist-credentials: false`, право `contents: write` — только
    у job публикации.
-6. **`install.sh`** — POSIX sh, проверяется `mise x shellcheck@0.11.0 -- shellcheck install.sh`; workflow —
-   `mise x actionlint@latest -- actionlint`. Установщик обязан сверять SHA256 и не трогать state и конфигурацию Claude;
+6. **`install.sh`** — POSIX sh, проверяется shellcheck, workflow — actionlint: оба в `bun run lint:release`, версии
+   закреплены в `.mise.toml`. Установщик обязан сверять SHA256 и не трогать state и конфигурацию Claude;
    строки вывода — на английском.

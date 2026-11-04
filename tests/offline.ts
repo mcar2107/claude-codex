@@ -42,6 +42,37 @@ const fresh = {
   account_id: 'test-account',
 };
 
+/**
+ * Вывод команды в тесте не нужен: проверяется результат в state, а не текст.
+ */
+const quietly = <T>(action: () => T): T => {
+  const { log } = console;
+
+  console.log = () => {};
+
+  try {
+    return action();
+  } finally {
+    console.log = log;
+  }
+};
+
+/**
+ * Код ошибки подключения к порту: после остановки сервера ожидается `ECONNREFUSED`.
+ */
+const connectError = (port: number) => {
+  return new Promise<string | undefined>((resolve) => {
+    const socket = net.connect(port, '127.0.0.1', () => {
+      socket.destroy();
+      resolve(undefined);
+    });
+
+    socket.once('error', (error: NodeJS.ErrnoException) => {
+      resolve(error.code);
+    });
+  });
+};
+
 const sse = (type: string, data: object) => {
   return `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
 };
@@ -104,22 +135,22 @@ const streamFrames = (response: UpstreamResponse) => {
 };
 
 try {
-  assert.equal(state.runtime, fixture);
-  assert.deepEqual(state.readSettings(), state.defaults);
+  assert.equal(state.RUNTIME_DIR, fixture);
+  assert.deepEqual(state.readSettings(), state.DEFAULT_SETTINGS);
   assert.equal(
     state.readSettings().reasoningEffort,
     'high',
     'Fresh installations must default to high'
   );
-  assert(!fs.existsSync(state.settingsFile), 'reading defaults must not write home');
-  state.saveSettings(state.defaults);
-  const before = fs.readFileSync(state.settingsFile, 'utf8');
+  assert(!fs.existsSync(state.SETTINGS_FILE), 'reading defaults must not write home');
+  state.saveSettings(state.DEFAULT_SETTINGS);
+  const before = fs.readFileSync(state.SETTINGS_FILE, 'utf8');
 
   assert.throws(() => {
     return state.saveSettings({ model: 'gpt-6.1-sol', reasoningEffort: 'none' });
   }, /supported effort levels/);
-  assert.equal(fs.readFileSync(state.settingsFile, 'utf8'), before);
-  assert.equal(fs.statSync(state.settingsFile).mode & 0o777, 0o600);
+  assert.equal(fs.readFileSync(state.SETTINGS_FILE, 'utf8'), before);
+  assert.equal(fs.statSync(state.SETTINGS_FILE).mode & 0o777, 0o600);
   const { parseOverrides } = await import('../src/session');
 
   assert.deepEqual(
@@ -137,23 +168,57 @@ try {
       .reasoningEffort,
     'low'
   );
-  fs.writeFileSync(state.settingsFile, 'null');
+  fs.writeFileSync(state.SETTINGS_FILE, 'null');
   assert.throws(
     () => {
       return state.readSettings();
     },
-    new RegExp(`Cannot read ${state.settingsFile}.*settings reset`)
+    new RegExp(`Cannot read ${state.SETTINGS_FILE}.*settings reset`)
   );
-  fs.writeFileSync(state.settingsFile, before);
+  fs.writeFileSync(state.SETTINGS_FILE, before);
   const { settings } = await import('../src/settings');
 
   assert.throws(() => {
     return settings(['preset', 'constructor']);
   }, /Unknown preset\. Choose sol\|balanced\|fast\|max/);
-  console.log(
-    'PASS: defaults, atomic private settings, readable errors for a broken settings file, future IDs, effort validation, presets and overrides.'
+  quietly(() => {
+    return settings(['preset', 'fast']);
+  });
+  assert.deepEqual(state.readSettings(), { model: 'gpt-6-luna', reasoningEffort: 'low' });
+  quietly(() => {
+    return settings(['set', '--effort', 'high']);
+  });
+  assert.deepEqual(
+    state.readSettings(),
+    { model: 'gpt-6-luna', reasoningEffort: 'high' },
+    'set changes only the given field'
   );
-  state.writeJson(state.authFile, fresh);
+  assert.throws(() => {
+    return settings(['set', '--effort', 'none']);
+  }, /supported effort levels/);
+  assert.equal(
+    state.readSettings().reasoningEffort,
+    'high',
+    'a rejected set keeps the file'
+  );
+  quietly(() => {
+    return settings(['show']);
+  });
+  quietly(() => {
+    return settings(['reset']);
+  });
+  assert.deepEqual(state.readSettings(), state.DEFAULT_SETTINGS);
+  assert.deepEqual(
+    fs.readdirSync(fixture).filter((name) => {
+      return name.endsWith('.tmp');
+    }),
+    [],
+    'atomic writes leave no temporary files'
+  );
+  console.log(
+    'PASS: defaults, atomic private settings, readable errors for a broken settings file, future IDs, effort validation, presets, settings set/show/reset and overrides.'
+  );
+  state.writeJson(state.AUTH_FILE, fresh);
   let captured: CapturedRequest | undefined;
   let output: ResponseOutputItem[] | undefined;
   let upstreamError: number | undefined;
@@ -459,7 +524,8 @@ try {
     upstreamError = 400;
     const bad = await post(request);
 
-    assert(bad.statusCode >= 400, bad.body);
+    assert.equal(bad.statusCode, 400, bad.body);
+    assert.match(bad.body, /Mock request rejected/);
     upstreamError = undefined;
     console.log(
       'PASS: actual source-backed CCR, client-selected model/effort for 5 IDs, startup settings fallback unaffected by later saves, effort clamping, overrides, count_tokens validation, Codex limit snapshot, last request record with the returned model, Responses Lite, tools/results, incremental SSE, auth and provider errors (mock upstream).'
@@ -504,7 +570,7 @@ try {
   /**
    * OAuth с чистого каталога: колбэк браузера и token endpoint — моки.
    */
-  fs.unlinkSync(state.authFile);
+  fs.unlinkSync(state.AUTH_FILE);
   await login({
     port: 0,
     onUrl: async (url, address) => {
@@ -561,20 +627,37 @@ try {
     },
   });
   assert(state.requireAuth().refresh_token);
-  assert.equal(fs.statSync(state.authFile).mode & 0o777, 0o600);
-  await assert.rejects(login({ port: 0, timeout: 20, onUrl: () => {} }), /timed out/);
+  assert.equal(fs.statSync(state.AUTH_FILE).mode & 0o777, 0o600);
+  let timedOutPort = 0;
+
+  await assert.rejects(
+    login({
+      port: 0,
+      timeout: 20,
+      onUrl: (_url, { port }) => {
+        timedOutPort = port;
+      },
+    }),
+    /timed out/
+  );
+  assert(timedOutPort > 0);
+  assert.equal(
+    await connectError(timedOutPort),
+    'ECONNREFUSED',
+    'the callback server is closed after a timeout'
+  );
   console.log(
     'PASS: clean PKCE OAuth, redirect URI from the listening port, malformed and invalid-state callbacks, private token storage and timeout cleanup (mock token endpoint).'
   );
   /**
    * Тот же хелпер обновления, что у настоящего трансформера, — без настоящих токенов.
    */
-  state.writeJson(state.authFile, {
+  state.writeJson(state.AUTH_FILE, {
     ...fresh,
     access_token: jwt({ exp: 1 }),
     expires_at: 1,
   });
-  process.env.CCR_CODEX_AUTH_FILE = state.authFile;
+  state.exposeAuthFile();
   let refreshed = 0;
 
   mockFetch(async () => {
@@ -594,8 +677,19 @@ try {
     globalThis.fetch = originalFetch;
   }
 
+  const { validTokens, withBridgeHint } = await import('../src/auth');
+
+  state.writeJson(state.AUTH_FILE, { access_token: jwt({ exp: 1 }), expires_at: 1 });
+  await assert.rejects(validTokens(), (error: Error) => {
+    assert.match(error.message, /claude-codex auth login/);
+    assert.doesNotMatch(error.message, /ccr codex-auth/);
+
+    return true;
+  });
+  assert.equal(withBridgeHint('not an error'), 'not an error');
+  state.writeJson(state.AUTH_FILE, fresh);
   console.log(
-    'PASS: CCR refresh helper deduplicates simultaneous refresh and atomically persists rotation (mock endpoint).'
+    'PASS: CCR refresh helper deduplicates simultaneous refresh and atomically persists rotation; its errors name claude-codex auth login (mock endpoint).'
   );
   const claudeDir = path.join(fixture, 'claude');
 
@@ -605,7 +699,20 @@ try {
   assert.throws(() => {
     return setup([]);
   }, /setup --remove/);
-  setup(['--remove']);
+  const logged: unknown[] = [];
+  const { log } = console;
+
+  console.log = (...args: unknown[]) => {
+    logged.push(...args);
+  };
+
+  try {
+    setup(['--remove']);
+  } finally {
+    console.log = log;
+  }
+
+  assert.match(String(logged[0]), /^No claude-codex slash commands found/);
   fs.mkdirSync(path.join(claudeDir, 'commands'), { recursive: true });
   fs.writeFileSync(path.join(claudeDir, 'commands', 'codex-model.md'), 'foreign command');
   assert.throws(() => {

@@ -7,8 +7,8 @@ import type { ModelsCache, Settings } from './state.types';
  * находить свойства прототипа.
  */
 const PRESETS = new Map<string, Settings>([
-  ['sol', state.defaults],
-  ['balanced', { model: state.defaults.model, reasoningEffort: 'medium' }],
+  ['sol', state.DEFAULT_SETTINGS],
+  ['balanced', { model: state.DEFAULT_SETTINGS.model, reasoningEffort: 'medium' }],
   ['fast', { model: 'gpt-6-luna', reasoningEffort: 'low' }],
   ['max', { model: 'gpt-6-astra', reasoningEffort: 'max' }],
 ]);
@@ -19,7 +19,7 @@ const show = () => {
   const { model, reasoningEffort } = state.readSettings();
 
   console.log(
-    `model=${model}\nreasoningEffort=${reasoningEffort}\nsettingsFile=${state.settingsFile}`
+    `model=${model}\nreasoningEffort=${reasoningEffort}\nsettingsFile=${state.SETTINGS_FILE}`
   );
 };
 
@@ -31,14 +31,15 @@ const discoveryCache = (items: unknown[]) => {
   return items.reduce<Omit<ModelsCache, 'refreshedAt'>>(
     (cache, item) => {
       if (typeof item !== 'object' || item === null) return cache;
-      const id = Reflect.get(item, 'slug') || Reflect.get(item, 'id');
+      const id: unknown = Reflect.get(item, 'slug') || Reflect.get(item, 'id');
 
       if (!state.isModelId(id) || cache.models.includes(id)) return cache;
       cache.models.push(id);
-      const size =
+      const size: unknown =
         Reflect.get(item, 'context_window') || Reflect.get(item, 'max_context_window');
 
-      if (Number.isInteger(size) && size > 0) cache.contextWindows[id] = size;
+      if (typeof size === 'number' && Number.isInteger(size) && size > 0)
+        cache.contextWindows[id] = size;
 
       return cache;
     },
@@ -71,7 +72,7 @@ const nextSettings = (command: string, rest: string[]): Settings | undefined => 
     case 'reset': {
       if (rest.length) throw new Error(SETTINGS_USAGE);
 
-      return state.defaults;
+      return state.DEFAULT_SETTINGS;
     }
 
     case 'preset': {
@@ -161,7 +162,7 @@ export const models = async (args: string[]) => {
       throw new Error(
         'Model discovery returned no models; saved settings and cache preserved'
       );
-    state.writeJson(state.modelsCacheFile, {
+    state.writeJson(state.MODELS_CACHE_FILE, {
       refreshedAt: new Date().toISOString(),
       ...discovered,
     });
@@ -182,6 +183,6 @@ export const models = async (args: string[]) => {
   }
 
   console.log('Configured candidates (not a promise of account access):');
-  for (const model of [...new Set([...state.models, state.readSettings().model])])
+  for (const model of [...new Set([...state.MODELS, state.readSettings().model])])
     console.log(`${model}: ${state.effortsFor(model).join(', ')}`);
 };

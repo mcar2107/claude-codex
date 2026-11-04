@@ -6,5 +6,5 @@
  */
 export default {
   '*.{ts,cjs,mjs,js}': ['eslint --fix --no-warn-ignored', 'mise x -- ast-grep scan'],
-  '*.{json,yml,yaml}': 'prettier --write',
+  '*.{json,jsonc,yml,yaml}': 'prettier --write',
 };

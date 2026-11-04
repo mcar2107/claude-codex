@@ -27,6 +27,29 @@ const RUN_TIMEOUT_MS = 60_000;
 const KILL_GRACE_MS = 5000;
 
 /**
+ * Сколько ждать, пока параллельные клиенты поднимутся и запишут ответ count_tokens.
+ */
+const READY_TIMEOUT_MS = 15_000;
+const POLL_INTERVAL_MS = 30;
+
+/**
+ * Потолок запроса к роутеру из теста: зависший роутер должен ронять тест, а не держать его.
+ */
+const REQUEST_TIMEOUT_MS = 5000;
+
+/**
+ * Окружение разработчика, которое увело бы мост мимо временного state: свой каталог Claude Code,
+ * ключ сессии, OAuth-файл и настройки моста (`CLAUDE_CODEX_*`, `CCR_*`).
+ */
+const FOREIGN_ENV = /^(CLAUDE_CODEX_|CCR_|CLAUDE_CONFIG_DIR$)/;
+
+/**
+ * Запущенные мосты: каждый — лидер своей группы процессов, чтобы по таймауту или Ctrl-C снять и
+ * его клиента с роутером, даже если сам мост не успел их завершить.
+ */
+const groups = new Set<number>();
+
+/**
  * Входы standalone-сборки: бинарник старше любого из них собран из другого кода.
  */
 const STANDALONE_INPUTS = [
@@ -65,7 +88,9 @@ printf '%s\\n' "$ANTHROPIC_BASE_URL" > "$record"
 /usr/bin/curl -fsS --max-time 10 -H "x-api-key: $ANTHROPIC_AUTH_TOKEN" -H 'Content-Type: application/json' -d '{"messages":[{"role":"user","content":"hello"}]}' "$ANTHROPIC_BASE_URL/v1/messages/count_tokens" > "$record.tokens" || exit 86
 if [ "$hold" = yes ]; then
   trap 'exit 0' TERM INT
-  while :; do /bin/sleep 1; done
+  # Смерть моста — тоже выход: сирота не должен крутиться после сбоя теста.
+  while kill -0 "$PPID" 2>/dev/null; do /bin/sleep 1; done
+  exit 0
 fi
 exit 7
 `;
@@ -84,7 +109,7 @@ const run = (
   const result = spawnSync(command, args, {
     cwd: root,
     encoding: 'utf8',
-    timeout: 60000,
+    timeout: RUN_TIMEOUT_MS,
     ...options,
   });
 
@@ -98,18 +123,33 @@ const run = (
   return result.stdout;
 };
 
-const waitFor = async (check: () => boolean, message: string) => {
-  const deadline = Date.now() + 15000;
+const killGroup = (pid: number | undefined, signal: NodeJS.Signals) => {
+  if (!pid) return;
 
-  while (!check()) {
-    if (Date.now() > deadline) throw new Error(message);
-    await delay(30);
+  try {
+    process.kill(-pid, signal);
+  } catch {
+    /**
+     * Группы уже нет: все её процессы вышли.
+     */
   }
 };
 
 const start = (command: string, args: string[], env: NodeJS.ProcessEnv) => {
-  const child = spawn(command, args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  /**
+   * `detached` — своя группа процессов: `killGroup` снимает мост вместе с потомками.
+   */
+  const child = spawn(command, args, {
+    env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    detached: true,
+  });
   let output = '';
+
+  if (child.pid) groups.add(child.pid);
+  child.once('exit', () => {
+    if (child.pid) groups.delete(child.pid);
+  });
 
   child.stdout.on('data', (chunk) => {
     output += chunk;
@@ -126,21 +166,57 @@ const start = (command: string, args: string[], env: NodeJS.ProcessEnv) => {
 
   done.catch(() => {});
 
-  return { child, done };
+  return {
+    child,
+    done,
+    output: () => {
+      return output;
+    },
+  };
+};
+
+type Started = ReturnType<typeof start>;
+
+/**
+ * Ждёт `check`, но падает сразу, если один из процессов вышел раньше, — с его выводом.
+ */
+const waitFor = async (check: () => boolean, message: string, watched: Started[]) => {
+  const deadline = Date.now() + READY_TIMEOUT_MS;
+
+  while (!check()) {
+    const exited = watched.find(({ child }) => {
+      return child.exitCode !== null || child.signalCode !== null;
+    });
+
+    /**
+     * Код 0 — тоже ранний выход, а не «кода нет»: `||` подменил бы его сигналом.
+     */
+    if (exited)
+      throw new Error(
+        `${message}: a process exited early (${exited.child.exitCode ?? exited.child.signalCode})\n${exited.output()}`
+      );
+    if (Date.now() > deadline)
+      throw new Error(
+        watched.reduce((text, { output }) => {
+          return `${text}\n${output()}`;
+        }, message)
+      );
+    await delay(POLL_INTERVAL_MS);
+  }
 };
 
 /**
  * Результат запуска не позже `RUN_TIMEOUT_MS`: по дедлайну мост получает SIGTERM (и уносит с
- * собой роутер и клиента), затем SIGKILL.
+ * собой роутер и клиента), затем SIGKILL всей группе — на случай, если мост не ответил.
  */
-const finish = async ({ child, done }: ReturnType<typeof start>, label: string) => {
+const finish = async ({ child, done }: Started, label: string) => {
   let isTimedOut = false;
   let killTimer: NodeJS.Timeout | undefined;
   const deadline = setTimeout(() => {
     isTimedOut = true;
     child.kill('SIGTERM');
     killTimer = setTimeout(() => {
-      return child.kill('SIGKILL');
+      return killGroup(child.pid, 'SIGKILL');
     }, KILL_GRACE_MS);
   }, RUN_TIMEOUT_MS);
 
@@ -198,17 +274,24 @@ const exercise = async (cli: string, isStandalone: boolean) => {
     mode: 0o600,
   });
   fs.writeFileSync(path.join(clientBin, 'claude'), FAKE_CLAUDE, { mode: 0o755 });
+  /**
+   * Подмены HOME мало: `CLAUDE_CONFIG_DIR` разработчика важнее homedir, и мост писал бы в его
+   * настоящий `settings.json`.
+   */
   const env: NodeJS.ProcessEnv = {
-    ...process.env,
+    ...Object.fromEntries(
+      Object.entries(process.env).filter(([name]) => {
+        return !FOREIGN_ENV.test(name);
+      })
+    ),
     PATH: isStandalone ? clientBin : `${clientBin}:${process.env.PATH}`,
     HOME: path.join(temp, 'home'),
+    CLAUDE_CONFIG_DIR: path.join(temp, `${kind}-claude`),
     CLAUDE_CODEX_STATE_DIR: state,
     CLAUDE_CODE_USE_BEDROCK: '1',
     ANTHROPIC_API_KEY: 'fake-old-key',
   };
 
-  delete env.CLAUDE_CODEX_MODEL;
-  delete env.CLAUDE_CODEX_EFFORT;
   /**
    * Для standalone-теста в этом PATH нет ни Node, ни Bun.
    */
@@ -236,22 +319,42 @@ const exercise = async (cli: string, isStandalone: boolean) => {
   );
 
   try {
-    await waitFor(() => {
-      return [aFile, bFile].every((file) => {
-        return fs.existsSync(file + '.tokens') && fs.statSync(file + '.tokens').size > 0;
-      });
-    }, 'concurrent clients did not become ready');
+    await waitFor(
+      () => {
+        return [aFile, bFile].every((file) => {
+          return (
+            fs.existsSync(file + '.tokens') && fs.statSync(file + '.tokens').size > 0
+          );
+        });
+      },
+      'concurrent clients did not become ready',
+      [a, b]
+    );
     assert.notEqual(fs.readFileSync(aFile, 'utf8'), fs.readFileSync(bFile, 'utf8'));
     assert.equal(sessions(state).length, 2);
     a.child.kill('SIGTERM');
-    await finish(a, `${kind} session a`);
+    const closed = await finish(a, `${kind} session a`);
+
+    /**
+     * Клиент выходит по пересланному SIGTERM с кодом 0, и мост возвращает его код.
+     */
+    assert.equal(closed.code, 0, closed.output);
     assert.equal(b.child.exitCode, null, 'closing one session must not stop another');
+    assert.equal(
+      sessions(state).length,
+      1,
+      'the closed session must be cleaned while another is alive'
+    );
     const base = fs.readFileSync(bFile, 'utf8').trim();
 
     /**
      * Аутентификация по-прежнему обязательна: соседний запрос без ключа должен упасть.
      */
-    assert.equal((await fetch(base + '/health')).status, 401);
+    assert.equal(
+      (await fetch(base + '/health', { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) }))
+        .status,
+      401
+    );
   } finally {
     a.child.kill('SIGTERM');
     b.child.kill('SIGTERM');
@@ -260,6 +363,17 @@ const exercise = async (cli: string, isStandalone: boolean) => {
 
   assert(!sessions(state).length);
 };
+
+/**
+ * Ctrl-C или SIGTERM тестового прогона: мосты в своих группах сигнал терминала не получат —
+ * снимаем их сами.
+ */
+for (const name of ['SIGINT', 'SIGTERM'] as const)
+  process.once(name, () => {
+    for (const pid of groups) killGroup(pid, 'SIGKILL');
+    fs.rmSync(temp, { recursive: true, force: true });
+    process.exit(130);
+  });
 
 try {
   const native = path.join(

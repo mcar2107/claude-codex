@@ -10,8 +10,8 @@ import tseslint from 'typescript-eslint';
 export default defineConfig(
   {
     /**
-     * vendor/ccr — исходники upstream байт в байт: их хеши сверяет vendor/ccr/original-sha256.json,
-     * поэтому ни линт, ни автофикс их не трогают. Остальное — сборки, артефакты и локальный state.
+     * vendor/ccr — исходники upstream байт в байт: scripts/verify-vendor.ts сверяет их с
+     * vendor/ccr/original-sha256.json, поэтому ни линт, ни автофикс их не трогают. Остальное — сборки, артефакты и локальный state.
      */
     ignores: [
       'vendor/**',
@@ -58,6 +58,16 @@ export default defineConfig(
       'no-undef': 'off',
       '@typescript-eslint/no-floating-promises': 'error',
       '@typescript-eslint/consistent-type-definitions': ['error', 'type'],
+      /**
+       * typescript.md: `T[]`, а не `Array<T>` (п. 7), и `import type` для импорта только типов
+       * (п. 10).
+       */
+      '@typescript-eslint/array-type': ['error', { default: 'array' }],
+      '@typescript-eslint/consistent-type-imports': 'error',
+      /**
+       * JSDoc обязателен только на полях типов (typescript.md, п. 9): у функций и классов имя и
+       * сигнатура обычно объясняют назначение, а заглушки ради правила — шум.
+       */
       'jsdoc/require-jsdoc': [
         'error',
         {
@@ -96,6 +106,10 @@ export default defineConfig(
        */
       'no-console': 'off',
       'no-unused-vars': 'off',
+      /**
+       * Префикс `_` — намеренно неиспользуемое имя: параметр, который требует сигнатура upstream
+       * (`_provider` трансформера), или пропуск при деструктуризации.
+       */
       '@typescript-eslint/no-unused-vars': [
         'error',
         {
@@ -133,6 +147,10 @@ export default defineConfig(
         },
       ],
       'padded-blocks': ['error', 'never'],
+      /**
+       * Пустой `case` — синонимы одной ветки (`help` / `--help` / `-h` в src/cli.ts), а не
+       * забытый `break`.
+       */
       'no-fallthrough': ['error', { allowEmptyCase: true }],
       'unicorn/switch-case-braces': ['error', 'always'],
       'padding-line-between-statements': [

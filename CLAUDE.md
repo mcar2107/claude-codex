@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Инструкции для Claude Code (claude.ai/code) при работе с кодом этого репозитория.
 
 Здесь — то, что нужно в любой задаче. Конвенции и устройство подсистем — в `.claude/rules/*.md` с `paths:`: файл
 правила подгружается сам, когда агент работает с его файлами (таблица — «Правила для агентов»).
@@ -22,13 +22,13 @@ standalone-бинарник. Пакетный менеджер — bun (`bun.loc
 
 ```bash
 bun install               # зависимости и хук husky
-mise install              # ast-grep, betterleaks, osv-scanner, agnix (linting.md)
+mise install              # ast-grep, betterleaks, osv-scanner, agnix, shellcheck, actionlint (linting.md)
 bun run build             # dist/cli.js
 bun run build:standalone  # artifacts/<target>/claude-codex
 bun run test              # офлайн-тесты (testing.md)
 bun run test:e2e          # бандл и standalone с фейковым клиентом Claude
 bun run typecheck         # tsc
-bun run lint              # eslint, tsc, prettier --check, Knip, ast-grep, agnix
+bun run lint              # eslint, tsc, prettier --check, Knip, ast-grep, agnix, shellcheck/actionlint, сверка vendor
 bun run lint:fix          # eslint --fix
 bun run format            # prettier --write
 bun run lint:secrets      # секреты в истории git; lint:deps — уязвимости
@@ -49,7 +49,7 @@ src/
   *.types.ts              типы модуля рядом с ним (typescript.md)
   transport/              адаптер к vendor/ccr: сервер Fastify, лимиты Codex (limits.ts), подмены модулей upstream (vendor.md)
 vendor/ccr/               исходники CCR upstream байт в байт — не править (vendor.md)
-scripts/                  сборка (build.ts — плагин подмен), standalone, лицензии, тест-раннеры
+scripts/                  сборка (build.ts — плагин подмен), сверка vendor, standalone, лицензии, тест-раннеры
 tests/offline.ts          офлайн-тесты нового CLI (testing.md)
 .github/workflows/release.yml  сборка и публикация бинарников по тегу v* (release.md)
 install.sh                установщик бинарника из GitHub Releases (release.md)
@@ -63,8 +63,8 @@ eslint.config.ts .prettierrc lint-staged.config.ts .husky/ tsconfig.json knip.js
 - **vendor/ccr не правится** — поведение меняется подменой в адаптере `src/transport/` (`vendor.md`).
 - **Без настоящих учётных данных.** Ни токены, ни локальный ключ сессии не печатаются, не логируются и не попадают
   в метаданные и тесты; тесты — на моках и временном state (`testing.md`).
-- **State пользователя не перезаписывается молча.** Setup проверяет все цели до первой записи и не заменяет чужие
-  файлы и команды.
+- **State пользователя не перезаписывается молча.** `setup --remove` проверяет все цели до первого удаления и не
+  удаляет чужие или изменённые команды.
 - **Язык.** Комментарии, JSDoc, правила и CLAUDE.md — на русском; строки CLI и `README.md` — на английском.
 - **Перед завершением задачи** — `bun run lint`, `bun run test` (`linting.md`).
 

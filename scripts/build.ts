@@ -4,7 +4,8 @@ import path from 'node:path';
 
 import type { BunPlugin } from 'bun';
 
-import { licenses } from './licenses';
+import { writeLicenses } from './licenses';
+import { verifyVendor } from './verify-vendor';
 
 const root = path.resolve(import.meta.dirname, '..');
 const core = path.join(root, 'vendor/ccr/core/src');
@@ -83,6 +84,7 @@ export const plugin: BunPlugin = {
 };
 
 export const build = async () => {
+  await verifyVendor();
   const result = await Bun.build({
     root,
     entrypoints: [resolve('src/cli.ts')],
@@ -96,7 +98,7 @@ export const build = async () => {
   });
 
   if (!result.metafile) throw new Error('Bun.build returned no metafile');
-  const licenseCount = licenses(result.metafile, root);
+  const licenseCount = writeLicenses(result.metafile, root);
 
   console.log(`Collected license texts for ${licenseCount} bundled dependencies.`);
   fs.chmodSync(resolve('dist/cli.js'), 0o755);

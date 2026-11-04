@@ -31,6 +31,16 @@ export const setup = (args: string[]) => {
   for (const item of files)
     if (fs.existsSync(item.file) && fs.readFileSync(item.file, 'utf8') !== item.content)
       throw new Error(`Refusing to remove a modified or foreign command: ${item.file}`);
-  for (const item of files) if (fs.existsSync(item.file)) fs.unlinkSync(item.file);
-  console.log('claude-codex slash commands removed.');
+  const removed = files.reduce((count, { file }) => {
+    if (!fs.existsSync(file)) return count;
+    fs.unlinkSync(file);
+
+    return count + 1;
+  }, 0);
+
+  console.log(
+    removed
+      ? `Removed ${removed} claude-codex slash command(s) from ${directory}.`
+      : `No claude-codex slash commands found in ${directory}.`
+  );
 };

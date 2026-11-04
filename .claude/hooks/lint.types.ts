@@ -122,3 +122,23 @@ export type TscGroups = {
    */
   other: string[];
 };
+
+/**
+ * Замечания eslint, разделённые по severity: errors печатаются первыми.
+ */
+export type EslintLines = {
+  /**
+   * Замечания `severity: error` — блокируют правку.
+   */
+  errors: string[];
+
+  /**
+   * Замечания `severity: warning`.
+   */
+  warnings: string[];
+};
+
+/**
+ * Журнал проверенных файлов: путь от корня репозитория → mtime на момент проверки, мс.
+ */
+export type CheckedLog = Record<string, number>;

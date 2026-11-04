@@ -43,21 +43,13 @@ const shellQuote = (value: string) => {
   return `'${value.replaceAll("'", String.raw`'\''`)}'`;
 };
 
-const isRecord = (value: unknown): value is ClaudeSettings => {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-};
-
 /**
  * Отсутствующий или битый файл настроек — `undefined`: такой файл не читает и Claude Code.
  */
 const readSettingsFile = (file: string): ClaudeSettings | undefined => {
-  try {
-    const parsed: unknown = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const parsed = state.readJsonQuietly(file);
 
-    return isRecord(parsed) ? parsed : undefined;
-  } catch {
-    return undefined;
-  }
+  return state.isRecord(parsed) ? parsed : undefined;
 };
 
 /**
@@ -91,7 +83,7 @@ export const extractSettings = (args: string[]): ExtractedSettings => {
     });
   }
 
-  if (!isRecord(parsed))
+  if (!state.isRecord(parsed))
     throw new Error('Cannot read --settings: expected a JSON object or a JSON file');
 
   return { settings: parsed, rest };
@@ -117,7 +109,7 @@ export const resolveStatusLine = (
   })?.statusLine;
 
   if (
-    !isRecord(statusLine) ||
+    !state.isRecord(statusLine) ||
     statusLine.type !== 'command' ||
     typeof statusLine.command !== 'string' ||
     !statusLine.command.trim()
@@ -147,7 +139,7 @@ export const modelLabel = (model: string) => {
  */
 const modelPicker = (active: string) => {
   const candidates = [
-    ...new Set([active, ...state.models, ...state.readModelsCache().models]),
+    ...new Set([active, ...state.MODELS, ...state.readModelsCache().models]),
   ];
 
   return {

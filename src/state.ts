@@ -12,13 +12,16 @@ import type {
   WriteJsonOptions,
 } from './state.types';
 
-export const runtime = path.resolve(
+export const RUNTIME_DIR = path.resolve(
   process.env.CLAUDE_CODEX_STATE_DIR || path.join(os.homedir(), '.claude-codex')
 );
-export const settingsFile = path.join(runtime, 'settings.json');
-export const authFile = path.join(runtime, 'codex_auth.json');
-export const defaults: Settings = { model: 'gpt-6.1-sol', reasoningEffort: 'high' };
-export const models = [
+export const SETTINGS_FILE = path.join(RUNTIME_DIR, 'settings.json');
+export const AUTH_FILE = path.join(RUNTIME_DIR, 'codex_auth.json');
+export const DEFAULT_SETTINGS: Settings = {
+  model: 'gpt-6.1-sol',
+  reasoningEffort: 'high',
+};
+export const MODELS = [
   'gpt-6.1-sol',
   'gpt-6-astra',
   'gpt-6.1-terra',
@@ -35,7 +38,7 @@ export const models = [
   'gpt-5.2',
 ];
 
-export const modelsCacheFile = path.join(runtime, 'models.json');
+export const MODELS_CACHE_FILE = path.join(RUNTIME_DIR, 'models.json');
 
 /**
  * Уровни effort по возрастанию: по этому порядку неподдерживаемый уровень понижается.
@@ -86,8 +89,16 @@ export const claudeConfigDir = () => {
   return process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
 };
 
-const isRecord = (value: unknown): value is Record<string, unknown> => {
+export const isRecord = (value: unknown): value is Record<string, unknown> => {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+};
+
+/**
+ * Файл OAuth для хелпера обновления токена CCR: vendor/ccr ищет его по `CCR_CODEX_AUTH_FILE`
+ * (имя upstream), а не по state-каталогу моста.
+ */
+export const exposeAuthFile = () => {
+  process.env.CCR_CODEX_AUTH_FILE = AUTH_FILE;
 };
 
 const validate = (value: SettingsInput): Settings => {
@@ -103,13 +114,26 @@ const validate = (value: SettingsInput): Settings => {
 };
 
 export const ensureState = () => {
-  fs.mkdirSync(runtime, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(RUNTIME_DIR, { recursive: true, mode: 0o700 });
 };
 
 /**
- * Атомарная запись JSON: временный файл рядом с целью и `rename`. Путь-симлинк (dotfiles через
- * stow или chezmoi) разрешается до записи: `rename` поверх самого симлинка отвязал бы файл от
- * его цели.
+ * JSON из необязательного файла: отсутствующий или битый файл — `undefined`, а не ошибка.
+ * Для файлов, без которых работа продолжается (настройки Claude Code, служебные файлы сессии).
+ */
+export const readJsonQuietly = (file: string): unknown => {
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    return undefined;
+  }
+};
+
+/**
+ * Атомарная запись JSON: временный файл рядом с целью, `fsync` и `rename`. Без `fsync` сбой ОС
+ * после `rename` мог бы оставить пустой файл на месте прежнего — для OAuth-файла это потеря
+ * ротируемого refresh-токена. Путь-симлинк (dotfiles через stow или chezmoi) разрешается до
+ * записи: `rename` поверх самого симлинка отвязал бы файл от его цели.
  */
 export const writeJson = (
   file: string,
@@ -122,10 +146,15 @@ export const writeJson = (
   const temporary = `${target}.${process.pid}.${crypto.randomBytes(8).toString('hex')}.tmp`;
 
   try {
-    fs.writeFileSync(temporary, JSON.stringify(data, null, 2) + '\n', {
-      mode,
-      flag: 'wx',
-    });
+    const descriptor = fs.openSync(temporary, 'wx', mode);
+
+    try {
+      fs.writeFileSync(descriptor, JSON.stringify(data, null, 2) + '\n');
+      fs.fsyncSync(descriptor);
+    } finally {
+      fs.closeSync(descriptor);
+    }
+
     fs.renameSync(temporary, target);
   } finally {
     fs.rmSync(temporary, { force: true });
@@ -133,9 +162,10 @@ export const writeJson = (
 };
 
 /**
- * JSON-объект из файла state; битый файл — ошибка с путём и подсказкой, а не голый `SyntaxError`.
+ * JSON-объект из обязательного файла state; битый файл — ошибка с путём и подсказкой, а не голый
+ * `SyntaxError`.
  */
-const readStateObject = (file: string, hint: string): Record<string, unknown> => {
+const readJsonStrict = (file: string, hint: string): Record<string, unknown> => {
   let parsed: unknown;
 
   try {
@@ -151,17 +181,17 @@ const readStateObject = (file: string, hint: string): Record<string, unknown> =>
 
 export const readSettings = (): Settings => {
   return validate(
-    fs.existsSync(settingsFile)
-      ? readStateObject(
-          settingsFile,
+    fs.existsSync(SETTINGS_FILE)
+      ? readJsonStrict(
+          SETTINGS_FILE,
           'expected a JSON object; fix it or run: claude-codex settings reset'
         )
-      : defaults
+      : DEFAULT_SETTINGS
   );
 };
 
 export const saveSettings = (value: SettingsInput) => {
-  writeJson(settingsFile, validate(value));
+  writeJson(SETTINGS_FILE, validate(value));
 };
 
 export const activeSettings = (
@@ -180,38 +210,30 @@ export const activeSettings = (
  * Кэш discovery необязателен: битый или чужой файл значит «кэша нет», а не ошибку запуска.
  */
 export const readModelsCache = (): ModelsCache => {
-  try {
-    const cache = JSON.parse(fs.readFileSync(modelsCacheFile, 'utf8'));
-    const discovered: unknown[] = Array.isArray(cache.models) ? cache.models : [];
-    const windows: [string, unknown][] =
-      typeof cache.contextWindows === 'object' && cache.contextWindows !== null
-        ? Object.entries(cache.contextWindows)
-        : [];
+  const cache = readJsonQuietly(MODELS_CACHE_FILE);
 
-    return {
-      refreshedAt: typeof cache.refreshedAt === 'string' ? cache.refreshedAt : '',
-      models: discovered.filter(isModelId),
-      contextWindows: windows.reduce<Record<string, number>>((result, [id, size]) => {
-        if (
-          isModelId(id) &&
-          typeof size === 'number' &&
-          Number.isInteger(size) &&
-          size > 0
-        )
-          result[id] = size;
+  if (!isRecord(cache)) return { refreshedAt: '', models: [], contextWindows: {} };
+  const discovered: unknown[] = Array.isArray(cache.models) ? cache.models : [];
+  const windows: [string, unknown][] = isRecord(cache.contextWindows)
+    ? Object.entries(cache.contextWindows)
+    : [];
 
-        return result;
-      }, {}),
-    };
-  } catch {
-    return { refreshedAt: '', models: [], contextWindows: {} };
-  }
+  return {
+    refreshedAt: typeof cache.refreshedAt === 'string' ? cache.refreshedAt : '',
+    models: discovered.filter(isModelId),
+    contextWindows: windows.reduce<Record<string, number>>((result, [id, size]) => {
+      if (isModelId(id) && typeof size === 'number' && Number.isInteger(size) && size > 0)
+        result[id] = size;
+
+      return result;
+    }, {}),
+  };
 };
 
 export const requireAuth = (): AuthFile => {
-  if (!fs.existsSync(authFile))
+  if (!fs.existsSync(AUTH_FILE))
     throw new Error('Not authenticated. Run: claude-codex auth login');
-  const auth = readStateObject(authFile, 'run: claude-codex auth login');
+  const auth = readJsonStrict(AUTH_FILE, 'run: claude-codex auth login');
   const { access_token: accessToken } = auth;
 
   if (typeof accessToken !== 'string' || !accessToken)

@@ -36,13 +36,19 @@ const readJson = async (response: Response): Promise<unknown> => {
   }
 };
 
+/**
+ * Потолок проверки doctor: чуть дольше таймаута роутера к Codex (`API_TIMEOUT_MS` в
+ * `src/transport/server.ts`), чтобы ошибку upstream успел вернуть роутер, а не оборвать клиент.
+ */
+const DOCTOR_TIMEOUT_MS = 130_000;
+
 const isDoctorResult = (value: unknown): value is DoctorResult => {
   return typeof value === 'object' && value !== null;
 };
 
 const help = () => {
   console.log(
-    `claude-codex ${version} — Claude Code → Codex OAuth\n\nUsage:\n  claude-codex [launch] [--model GPT-ID] [--effort LEVEL] [Claude Code arguments]\n  claude-codex auth login|status\n  claude-codex doctor [--model GPT-ID] [--effort LEVEL]\n  claude-codex settings show|set|reset|preset\n  claude-codex models [refresh]\n  claude-codex setup --remove\n\nState: ${state.runtime}\nRequires Bun >=1.4.0 for the bundled CLI and a separately installed Claude Code.\nFlags and saved settings pick the starting model/effort; switch in a session with /model and /effort.\nSession commands: /codex:settings, /codex:models. Use -- to stop parsing bridge flags.\nUse doctor for a real upstream check. Candidate model names do not prove access.`
+    `claude-codex ${version} — Claude Code → Codex OAuth\n\nUsage:\n  claude-codex [launch] [--model GPT-ID] [--effort LEVEL] [Claude Code arguments]\n  claude-codex auth login|status\n  claude-codex doctor [--model GPT-ID] [--effort LEVEL]\n  claude-codex settings show|set|reset|preset\n  claude-codex models [refresh]\n  claude-codex setup --remove\n\nState: ${state.RUNTIME_DIR}\nRequires Bun >=1.4.0 for the bundled CLI and a separately installed Claude Code.\nFlags and saved settings pick the starting model/effort; switch in a session with /model and /effort.\nSession commands: /codex:settings, /codex:models. Use -- to stop parsing bridge flags.\nUse doctor for a real upstream check. Candidate model names do not prove access.`
   );
 };
 
@@ -69,7 +75,7 @@ const doctor = async (args: string[]) => {
         output_config: { effort: active.reasoningEffort },
         messages: [{ role: 'user', content: 'Reply with exactly: ok' }],
       }),
-      signal: AbortSignal.any([signal, AbortSignal.timeout(130000)]),
+      signal: AbortSignal.any([signal, AbortSignal.timeout(DOCTOR_TIMEOUT_MS)]),
     });
     const result = await readJson(response);
 

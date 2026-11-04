@@ -25,3 +25,5 @@ paths:
    заменяет (отсюда default-экспорт `registry.ts`).
 4. **Обновление upstream** — новая ревизия целиком: исходники, `original-sha256.json`, `PROVENANCE.md`, затем
    `bun run typecheck`, `bun run test`, `bun run build`.
+5. **Сверка хешей** — `scripts/verify-vendor.ts`: `bun run lint:vendor` и первый шаг `bun run build` (а с ним
+   standalone и релиза). Расхождение с `original-sha256.json` роняет сборку списком файлов.

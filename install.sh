@@ -86,7 +86,9 @@ for file in "$temp/$name"/*; do
   [ "$(basename "$file")" = claude-codex ] || cp "$file" "$SHARE_DIR/"
 done
 
-echo "Installed $BIN_DIR/claude-codex ($("$BIN_DIR/claude-codex" --version))"
+# Смоук отдельной командой: сбой подстановки внутри аргумента echo `set -e` не прерывает.
+installed_version=$("$BIN_DIR/claude-codex" --version) || fail "installed binary does not run: $BIN_DIR/claude-codex"
+echo "Installed $BIN_DIR/claude-codex ($installed_version)"
 echo "License notices: $SHARE_DIR"
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;

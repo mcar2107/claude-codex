@@ -8,8 +8,10 @@ paths:
 Форматирование (prettier) и синтаксис (eslint) проверяют конфиги — здесь то, что они не ловят или ловят не целиком.
 
 1. Только именованные экспорты: `export const`, не `export default`. Исключения — `src/transport/registry.ts` (его
-   default-импортирует код vendor/ccr: `import Transformers from '@/transformer'`) и конфиги инструментов
-   (`eslint.config.ts`, `lint-staged.config.ts`), которые читают default-экспорт.
+   default-импортирует код vendor/ccr: `import Transformers from '@/transformer'`), виртуальный модуль
+   `tiktoken-wasm` (байты WASM — default-экспорт модуля, который генерирует плагин `scripts/build.ts`, объявлен в
+   `src/transport/tiktoken.types.ts`) и конфиги инструментов (`eslint.config.ts`, `lint-staged.config.ts`), которые
+   читают default-экспорт.
 2. Предпочитай ES-методы (`find`, `flatMap`, `Object.entries`). lodash в проекте нет — не тащи его ради одной утилиты.
 3. Явный `return`, если функция возвращает значение (`arrow-body-style: always` в eslint).
 4. `switch` предпочтительнее цепочки `if` по значениям одного union. *(см. ниже)*

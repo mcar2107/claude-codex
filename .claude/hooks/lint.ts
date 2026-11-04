@@ -4,7 +4,8 @@
  *
  * Ловит и Edit/Write (`tool_input.file_path`), и Bash (`tool_input.command`): при работе через
  * `sed -i`, heredoc или скрипты правка идёт мимо `file_path`, поэтому пути вытаскиваются из самой
- * команды. Файлы, которые команда только читала, отсекает окно по времени изменения.
+ * команды. Файлы, которые команда только читала, отсекают окно по времени изменения и журнал
+ * проверенных mtime: файл, не изменившийся с прошлой проверки, повторно не линтуется.
  *
  * - `.ts` — eslint и tsc по проекту; `.js`, `.mjs`, `.cjs` — eslint;
  * - vendor/ccr, сборки и зависимости не линтуются;
@@ -12,15 +13,19 @@
  *
  * Коды выхода:
  *
- * - 0 — чисто, только warnings или ошибки tsc в других файлах;
+ * - 0 — чисто, только warnings или ошибки tsc в других файлах; отчёт уходит агенту JSON-ом
+ *   `additionalContext` в stdout — stderr при exit 0 агент не видит;
  * - 1 — линтер не отработал: нет бинарника, упал, снят по таймауту, неразбираемый вывод;
- * - 2 — ошибки в правленых файлах или в конфигурации tsc: правка блокируется, отчёт уходит агенту.
+ * - 2 — ошибки в правленых файлах или в конфигурации tsc: правка блокируется, отчёт уходит агенту
+ *   через stderr.
  */
 import fs from 'node:fs';
 import path from 'node:path';
 
 import type {
+  CheckedLog,
   EslintFileResult,
+  EslintLines,
   LintOutcome,
   RunResult,
   TscDiagnostic,
@@ -31,6 +36,12 @@ const ROOT = path.resolve(import.meta.dirname, '../..');
 const ESLINT_BIN = path.join(ROOT, 'node_modules/.bin/eslint');
 const TSC_BIN = path.join(ROOT, 'node_modules/.bin/tsc');
 const TSC_CACHE = 'node_modules/.cache/claude-tsc.tsbuildinfo';
+
+/**
+ * Журнал mtime файлов, уже проверенных хуком: `rg` или `cat` сразу после правки не перезапускают
+ * eslint и tsc и не повторяют отчёт.
+ */
+const CHECKED_LOG = path.join(ROOT, 'node_modules/.cache/claude-lint-checked.json');
 const ESLINT_TIMEOUT_MS = 60_000;
 const TSC_TIMEOUT_MS = 90_000;
 
@@ -175,10 +186,52 @@ const stringField = (value: unknown, key: string) => {
   return typeof field === 'string' && field ? field : undefined;
 };
 
+const readCheckedLog = (): CheckedLog => {
+  try {
+    const parsed: unknown = JSON.parse(fs.readFileSync(CHECKED_LOG, 'utf8'));
+
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+      ? Object.fromEntries(
+          Object.entries(parsed).filter(([, mtime]) => {
+            return typeof mtime === 'number';
+          })
+        )
+      : {};
+  } catch {
+    /**
+     * Журнала нет или он битый — значит, проверенных файлов нет: худшее — лишний прогон.
+     */
+    return {};
+  }
+};
+
 /**
- * Правленые файлы из ввода хука: `file_path` правки и свежие пути из Bash-команды.
+ * Записи старше окна не нужны: такой файл из Bash-команды и так не считается правленым.
  */
-const editedFiles = (input: unknown, now: number) => {
+const writeCheckedLog = (log: CheckedLog, files: string[], now: number) => {
+  const next = Object.entries(log).reduce<CheckedLog>((result, [file, mtime]) => {
+    if (now - mtime <= MTIME_WINDOW_MS) result[file] = mtime;
+
+    return result;
+  }, {});
+
+  for (const file of files) next[file] = fs.statSync(path.join(ROOT, file)).mtimeMs;
+
+  try {
+    fs.mkdirSync(path.dirname(CHECKED_LOG), { recursive: true });
+    fs.writeFileSync(CHECKED_LOG, JSON.stringify(next));
+  } catch {
+    /**
+     * Без журнала хук только перепроверит файл при следующем чтении — это не сбой линтера.
+     */
+  }
+};
+
+/**
+ * Правленые файлы из ввода хука: `file_path` правки и свежие пути из Bash-команды, которые
+ * изменились после прошлой проверки.
+ */
+const editedFiles = (input: unknown, now: number, checked: CheckedLog) => {
   const toolInput: unknown =
     typeof input === 'object' && input !== null
       ? Reflect.get(input, 'tool_input')
@@ -197,10 +250,10 @@ const editedFiles = (input: unknown, now: number) => {
   for (const [candidate] of command.matchAll(COMMAND_PATH)) {
     const relative = toRelative(cwd, candidate);
 
-    if (
-      relative &&
-      now - fs.statSync(path.join(ROOT, relative)).mtimeMs <= MTIME_WINDOW_MS
-    )
+    if (!relative) continue;
+    const { mtimeMs } = fs.statSync(path.join(ROOT, relative));
+
+    if (now - mtimeMs <= MTIME_WINDOW_MS && checked[relative] !== mtimeMs)
       files.add(relative);
   }
 
@@ -250,25 +303,36 @@ const lintEslint = async (files: string[]): Promise<LintOutcome> => {
       '[eslint] unparseable JSON output:',
       result.stdout.slice(0, MAX_CRASH_OUTPUT),
     ]);
-  const lines = parsed.flatMap(({ filePath, messages }) => {
-    const file = path.relative(ROOT, filePath);
+  /**
+   * Errors — вперёд: отчёт режется по `MAX_REPORT_LINES`, и блокирующие замечания не должны
+   * утонуть за warnings.
+   */
+  const { errors, warnings } = parsed.reduce<EslintLines>(
+    (groups, { filePath, messages }) => {
+      const file = path.relative(ROOT, filePath);
 
-    return messages.map(({ line, column, severity, message, ruleId }) => {
-      return `${file}:${line || 0}:${column || 0} ${severity === 2 ? 'error' : 'warn'} ${message} [${ruleId || '?'}]`;
-    });
-  });
-  const errors = lines.filter((line) => {
-    return line.includes(' error ');
-  }).length;
+      for (const { line, column, severity, message, ruleId } of messages) {
+        const isError = severity === 2;
 
-  if (!lines.length) return { hasErrors: false, hasCrashed: false, report: [] };
+        (isError ? groups.errors : groups.warnings).push(
+          `${file}:${line || 0}:${column || 0} ${isError ? 'error' : 'warn'} ${message} [${ruleId || '?'}]`
+        );
+      }
+
+      return groups;
+    },
+    { errors: [], warnings: [] }
+  );
+
+  if (!errors.length && !warnings.length)
+    return { hasErrors: false, hasCrashed: false, report: [] };
 
   return {
-    hasErrors: errors > 0,
+    hasErrors: errors.length > 0,
     hasCrashed: false,
     report: [
-      `[eslint] ${errors} error(s), ${lines.length - errors} warning(s):`,
-      ...lines.slice(0, MAX_REPORT_LINES),
+      `[eslint] ${errors.length} error(s), ${warnings.length} warning(s):`,
+      ...[...errors, ...warnings].slice(0, MAX_REPORT_LINES),
     ],
   };
 };
@@ -360,27 +424,65 @@ const readInput = async (): Promise<unknown> => {
   }
 };
 
-const files = editedFiles(await readInput(), Date.now());
+/**
+ * Исключение линтера (бинарник без права на исполнение, сбой spawn) — его сбой, а не повод
+ * потерять отчёт соседа.
+ */
+const settle = async (name: string, lint: () => Promise<LintOutcome>) => {
+  try {
+    return await lint();
+  } catch (error) {
+    return crashed([
+      `[${name}] crashed: ${error instanceof Error ? error.message : String(error)}`,
+    ]);
+  }
+};
+
+const now = Date.now();
+const checked = readCheckedLog();
+const files = editedFiles(await readInput(), now, checked);
 const tsFiles = files.filter((file) => {
   return file.endsWith('.ts');
 });
 const outcomes = await Promise.all([
-  files.length ? lintEslint(files) : undefined,
-  tsFiles.length ? lintTsc(tsFiles) : undefined,
+  files.length
+    ? settle('eslint', () => {
+        return lintEslint(files);
+      })
+    : undefined,
+  tsFiles.length
+    ? settle('tsc', () => {
+        return lintTsc(tsFiles);
+      })
+    : undefined,
 ]);
 
-for (const outcome of outcomes)
-  for (const line of outcome?.report || []) process.stderr.write(`${line}\n`);
+if (files.length) writeCheckedLog(checked, files, now);
+const report = outcomes
+  .reduce<string[]>((lines, outcome) => {
+    return [...lines, ...(outcome?.report || [])];
+  }, [])
+  .join('\n');
+const hasErrors = outcomes.some((outcome) => {
+  return outcome?.hasErrors;
+});
+const hasCrashed = outcomes.some((outcome) => {
+  return outcome?.hasCrashed;
+});
+
+/**
+ * stderr агент видит только при exit 2; при exit 0 warnings и ошибки tsc в других файлах
+ * доходят до него через `additionalContext`.
+ */
+if (report && !hasErrors && !hasCrashed)
+  process.stdout.write(
+    JSON.stringify({
+      hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: report },
+    })
+  );
+else if (report) process.stderr.write(`${report}\n`);
 
 /**
  * Ошибки в правке важнее сбоя соседнего линтера: агенту нужен их отчёт.
  */
-process.exitCode = outcomes.some((outcome) => {
-  return outcome?.hasErrors;
-})
-  ? 2
-  : outcomes.some((outcome) => {
-        return outcome?.hasCrashed;
-      })
-    ? 1
-    : 0;
+process.exitCode = hasErrors ? 2 : hasCrashed ? 1 : 0;

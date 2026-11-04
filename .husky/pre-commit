@@ -1,5 +1,9 @@
-# Гейт коммита: параллельная проверка staged-файлов (lint-staged), типов (tsc), офлайн-тестов и
-# секретов в staged-изменениях — шаги независимы.
+# Гейт коммита: сначала lint-staged, затем параллельно типы (tsc), офлайн-тесты и секреты в
+# staged-изменениях.
+#
+# lint-staged — отдельным шагом: он переписывает файлы (`eslint --fix`, `prettier --write`) и прячет
+# unstaged-правки в stash. Параллельные проверки читали бы дерево посреди этой работы, а
+# `--kill-others-on-fail` при падении соседа убил бы lint-staged до возврата stash.
 #
 # Бинарные инструменты проверок (ast-grep, betterleaks) ставит mise по .mise.toml, недостающий
 # `mise x` доставит сам. Без mise хук упал бы голым «command not found» — падаем с подсказкой.
@@ -8,4 +12,5 @@ if ! command -v mise >/dev/null 2>&1; then
   exit 1
 fi
 
-bunx concurrently --kill-others-on-fail "bunx lint-staged" "bun run typecheck" "bun run test" "mise x -- betterleaks git --pre-commit --staged --redact -v --no-banner" || exit 1
+bunx lint-staged || exit 1
+bunx concurrently --kill-others-on-fail "bun run typecheck" "bun run test" "mise x -- betterleaks git --pre-commit --staged --redact -v --no-banner" || exit 1

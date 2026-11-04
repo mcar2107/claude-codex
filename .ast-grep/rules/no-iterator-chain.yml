@@ -1,9 +1,9 @@
-# Два метода-итератора подряд — два прохода и промежуточный массив: правило #15 code-style.md
+# Два метода-итератора подряд — два прохода и промежуточный массив: правило #13 code-style.md
 # сворачивает их в один reduce.
 id: no-iterator-chain
 language: typescript
 severity: error
-message: 'Цепочка методов-итераторов — сверни в один reduce (code-style.md, #15)'
+message: 'Цепочка методов-итераторов — сверни в один reduce (code-style.md, #13)'
 ignores:
   - vendor/**
   - node_modules/**

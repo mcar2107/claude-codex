@@ -13,6 +13,28 @@ const CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
  */
 const CALLBACK_PORT = 1455;
 const CALLBACK_PATH = '/auth/callback';
+const AUTH_ORIGIN = 'https://auth.openai.com';
+
+/**
+ * Сколько ждать колбэк из браузера; тот же срок назван в подсказке со ссылкой.
+ */
+const LOGIN_TIMEOUT_MS = 300_000;
+
+/**
+ * Потолок обмена кода на токены: зависший token endpoint не должен держать логин до общего
+ * таймаута.
+ */
+const TOKEN_EXCHANGE_TIMEOUT_MS = 30_000;
+
+/**
+ * Срок access token, если ни JWT, ни ответ token endpoint его не сообщили, — секунды.
+ */
+const DEFAULT_TOKEN_TTL_S = 3600;
+
+/**
+ * Подсказка upstream называет команду CCR, которой в мосте нет.
+ */
+const UPSTREAM_AUTH_HINT = /`ccr codex-auth`/g;
 
 const redirectUri = (port: number) => {
   return `http://localhost:${port}${CALLBACK_PATH}`;
@@ -44,7 +66,7 @@ const isTokenExchange = (value: unknown): value is TokenExchange => {
 };
 
 export const status = () => {
-  if (!fs.existsSync(state.authFile)) {
+  if (!fs.existsSync(state.AUTH_FILE)) {
     console.log('OAuth credentials: missing\nRun: claude-codex auth login');
 
     return 1;
@@ -60,21 +82,37 @@ export const status = () => {
   return 0;
 };
 
+/**
+ * Ошибка хелпера CCR с подсказкой моста вместо команды upstream.
+ */
+export const withBridgeHint = (error: unknown) => {
+  if (!(error instanceof Error)) return error;
+  const message = error.message.replace(UPSTREAM_AUTH_HINT, '`claude-codex auth login`');
+
+  return message === error.message ? error : new Error(message, { cause: error });
+};
+
 export const validTokens = async () => {
   state.requireAuth();
-  process.env.CCR_CODEX_AUTH_FILE = state.authFile;
+  state.exposeAuthFile();
   const { getValidAccessToken } = await import('../vendor/ccr/core/src/utils/codex-auth');
 
-  return getValidAccessToken();
+  try {
+    return await getValidAccessToken();
+  } catch (error) {
+    throw withBridgeHint(error);
+  }
 };
 
 export const login = async ({
   port = CALLBACK_PORT,
   onUrl = (url) => {
-    return console.log(`Open this URL in your browser (valid for 5 minutes):\n${url}`);
+    return console.log(
+      `Open this URL in your browser (valid for ${LOGIN_TIMEOUT_MS / 60_000} minutes):\n${url}`
+    );
   },
   fetchImpl = fetch,
-  timeout = 300000,
+  timeout = LOGIN_TIMEOUT_MS,
   signal,
 }: LoginOptions = {}) => {
   state.ensureState();
@@ -148,7 +186,7 @@ export const login = async ({
     isBusy = true;
 
     try {
-      const result = await fetchImpl('https://auth.openai.com/oauth/token', {
+      const result = await fetchImpl(`${AUTH_ORIGIN}/oauth/token`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({
@@ -158,7 +196,10 @@ export const login = async ({
           redirect_uri: redirect,
           code_verifier: verifier,
         }),
-        signal: AbortSignal.any([controller.signal, AbortSignal.timeout(30000)]),
+        signal: AbortSignal.any([
+          controller.signal,
+          AbortSignal.timeout(TOKEN_EXCHANGE_TIMEOUT_MS),
+        ]),
       });
 
       if (!result.ok)
@@ -175,7 +216,7 @@ export const login = async ({
         throw new Error('OAuth exchange omitted required credentials');
       const idClaims = claims(tokens.id_token)['https://api.openai.com/auth'] || {};
 
-      state.writeJson(state.authFile, {
+      state.writeJson(state.AUTH_FILE, {
         access_token: tokens.access_token,
         refresh_token: tokens.refresh_token,
         id_token: tokens.id_token,
@@ -183,7 +224,7 @@ export const login = async ({
         expires_at:
           claims(tokens.access_token).exp ||
           tokens.expires_at ||
-          Date.now() / 1000 + (tokens.expires_in || 3600),
+          Date.now() / 1000 + (tokens.expires_in || DEFAULT_TOKEN_TTL_S),
         account_id: tokens.account_id || idClaims.chatgpt_account_id,
         account_is_fedramp: idClaims.chatgpt_account_is_fedramp === true,
         last_refresh: Date.now() / 1000,
@@ -204,14 +245,10 @@ export const login = async ({
     fail(new Error('OAuth login cancelled'));
   };
 
-  const onInterrupt = () => {
-    return abort();
-  };
-
   let timer: NodeJS.Timeout | undefined;
 
-  process.once('SIGINT', onInterrupt);
-  process.once('SIGTERM', onInterrupt);
+  process.once('SIGINT', abort);
+  process.once('SIGTERM', abort);
   signal?.addEventListener('abort', abort, { once: true });
 
   try {
@@ -229,7 +266,7 @@ export const login = async ({
     if (!address || typeof address === 'string')
       throw new Error('OAuth callback is not listening');
     redirect = redirectUri(address.port);
-    const url = new URL('https://auth.openai.com/oauth/authorize');
+    const url = new URL(`${AUTH_ORIGIN}/oauth/authorize`);
 
     url.search = new URLSearchParams({
       response_type: 'code',
@@ -254,8 +291,8 @@ export const login = async ({
     clearTimeout(timer);
     controller.abort();
     signal?.removeEventListener('abort', abort);
-    process.removeListener('SIGINT', onInterrupt);
-    process.removeListener('SIGTERM', onInterrupt);
+    process.removeListener('SIGINT', abort);
+    process.removeListener('SIGTERM', abort);
     server.closeAllConnections();
     if (server.listening)
       await new Promise((resolve) => {

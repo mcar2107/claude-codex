@@ -59,11 +59,15 @@ const stringOrNull = (value: unknown) => {
   return typeof value === 'string' && value ? value : null;
 };
 
-export async function createRouter({
+export const createRouter = async ({
   key,
   limitsFile,
   requestFile,
-}: CreateRouterOptions) {
+}: CreateRouterOptions) => {
+  /**
+   * Пустой ключ совпал бы с запросом без ключа: `timingSafeEqual` двух пустых буферов — `true`.
+   */
+  if (!key) throw new Error('Router requires a non-empty session key');
   /**
    * Настройки читаются один раз, на старте сессии: сохранённые позже — умолчания для новых сессий.
    * Иначе `settings set` из другого терминала менял бы открытую сессию, а несовместимая с её
@@ -82,7 +86,7 @@ export async function createRouter({
    */
   let latestRecord: LastRequest | undefined;
 
-  process.env.CCR_CODEX_AUTH_FILE = state.authFile;
+  state.exposeAuthFile();
   process.env.CCR_MODELSDEV_DISABLE = '1';
   const app = Fastify({ logger: false, bodyLimit: BODY_LIMIT_BYTES });
 
@@ -145,7 +149,7 @@ export async function createRouter({
           name: 'codex',
           api_base_url: 'https://chatgpt.com/backend-api/codex',
           api_key: 'oauth',
-          models: [...state.models],
+          models: [...state.MODELS],
           transformer: {
             use: [
               'local-codex-settings',
@@ -211,8 +215,8 @@ export async function createRouter({
     },
   });
   /**
-   * Последний в цепочке запроса — значит, первый в цепочке ответа (`compileTransformerPlan`):
-   * видит заголовки ответа Codex до того, как ответ пересоберут в протокол клиента.
+   * Последний в цепочке запроса — значит, первый в цепочке ответа: видит заголовки ответа Codex
+   * до того, как ответ пересоберут в протокол клиента.
    */
   transformerService.registerTransformer('local-codex-limits', {
     name: 'local-codex-limits',
@@ -232,16 +236,23 @@ export async function createRouter({
        */
       const [forClient, probe] = response.body.tee();
 
-      probeResponseModel(probe, context?.signal)
-        .then((returnedModel) => {
+      const recordReturnedModel = async () => {
+        try {
+          const returnedModel = await probeResponseModel(probe, context?.signal);
+
           if (returnedModel && record === latestRecord)
             writeQuietly(requestFile, { ...record, returnedModel });
-        })
-        .catch(() => {
+        } catch {
           /**
            * Зонд не бросает, но и сбой здесь касается только диагностического файла.
            */
-        });
+        }
+      };
+
+      /**
+       * Зонд идёт в фоне: ответ клиенту не ждёт, пока дочитается копия потока.
+       */
+      void recordReturnedModel();
 
       return new Response(forClient, {
         status: response.status,
@@ -274,7 +285,7 @@ export async function createRouter({
   app.get('/v1/models', async () => {
     return {
       object: 'list',
-      data: state.models.map((id: string) => {
+      data: state.MODELS.map((id: string) => {
         return {
           id: state.CLIENT_PREFIX + id,
           object: 'model',
@@ -290,4 +301,4 @@ export async function createRouter({
   await app.ready();
 
   return app;
-}
+};

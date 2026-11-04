@@ -35,7 +35,25 @@ const ownerPackage = (file: string, nodeModules: string): BundledPackage | undef
   return undefined;
 };
 
-export const licenses = (metafile: BuildMetafile, root: string) => {
+/**
+ * Побайтовое сравнение, а не `localeCompare`: порядок в файле не должен зависеть от локали
+ * раннера.
+ */
+const byCodeUnits = (a: string, b: string) => {
+  return a < b ? -1 : a > b ? 1 : 0;
+};
+
+/**
+ * Файлы лицензий пакета: `LICENSE`, `LICENSE.md`, `LICENSE-MIT`, `LICENSE_APACHE`, `COPYING`,
+ * `NOTICE`, `UNLICENSE`.
+ */
+const LICENSE_FILE = /^(un)?(licen[sc]e|copying|notice)([._-]|$)/i;
+
+/**
+ * Собирает тексты лицензий пакетов бандла в `THIRD_PARTY_LICENSES.txt` в корне репозитория;
+ * возвращает число пакетов.
+ */
+export const writeLicenses = (metafile: BuildMetafile, root: string) => {
   const nodeModules = path.join(root, 'node_modules');
   /**
    * Ключ — имя и версия: установка может положить одну версию пакета в несколько каталогов,
@@ -55,17 +73,25 @@ export const licenses = (metafile: BuildMetafile, root: string) => {
   const texts = [
     'Bundled third-party licenses. Generated from actual Bun.build inputs.\nCCR source license is also provided separately as vendor/ccr/LICENSE.\n',
   ];
-  const sorted = [...packages.values()].sort((a, b) => {
-    return String(a.pkg.name).localeCompare(String(b.pkg.name));
+  /**
+   * Ключ карты — `name@version`: две версии одного пакета тоже идут в стабильном порядке.
+   */
+  const sorted = [...packages.entries()].sort(([a], [b]) => {
+    return byCodeUnits(a, b);
   });
 
-  for (const { directory, pkg } of sorted) {
-    const names = fs.readdirSync(directory).filter((name) => {
-      return (
-        /^(licen[sc]e|copying|notice)(\.|$)/i.test(name) &&
-        fs.statSync(path.join(directory, name)).isFile()
-      );
-    });
+  for (const [, { directory, pkg }] of sorted) {
+    /**
+     * Порядок `readdirSync` зависит от файловой системы — сортируем сами.
+     */
+    const names = fs
+      .readdirSync(directory)
+      .filter((name) => {
+        return (
+          LICENSE_FILE.test(name) && fs.statSync(path.join(directory, name)).isFile()
+        );
+      })
+      .sort(byCodeUnits);
 
     texts.push(
       `\n${'='.repeat(72)}\n${pkg.name}@${pkg.version} — ${pkg.license || 'see license below'}\n`

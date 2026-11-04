@@ -1,18 +1,12 @@
 import { spawn } from 'node:child_process';
-import fs from 'node:fs';
 import path from 'node:path';
 
 import type { RateLimits } from './transport/limits.types';
 import { STATUS_LINE_FILE } from './client';
 import { LIMITS_FILE } from './session';
+import * as state from './state';
 
-const readJson = (file: string): unknown => {
-  try {
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch {
-    return undefined;
-  }
-};
+const FORWARDED_SIGNALS: NodeJS.Signals[] = ['SIGTERM', 'SIGINT', 'SIGHUP'];
 
 /**
  * Окна снимка, которые ещё не сброшены: после сброса процент в снимке уже не правда.
@@ -73,23 +67,40 @@ export const withRateLimits = (input: string, limits: unknown, now = Date.now())
  */
 export const statusline = async (session: string | undefined) => {
   if (!session) throw new Error('Usage: claude-codex __statusline SESSION');
-  const original: unknown = readJson(path.join(session, STATUS_LINE_FILE));
-  const command: unknown =
-    typeof original === 'object' && original !== null
-      ? Reflect.get(original, 'command')
-      : undefined;
+  const original = state.readJsonQuietly(path.join(session, STATUS_LINE_FILE));
+  const command = state.isRecord(original) ? original.command : undefined;
 
   if (typeof command !== 'string') return 0;
   const input = await Bun.stdin.text();
-  const output = withRateLimits(input, readJson(path.join(session, LIMITS_FILE)));
+  const output = withRateLimits(
+    input,
+    state.readJsonQuietly(path.join(session, LIMITS_FILE))
+  );
 
   return new Promise<number>((resolve, reject) => {
     const child = spawn('/bin/sh', ['-c', command], {
       stdio: ['pipe', 'inherit', 'inherit'],
     });
 
-    child.once('error', reject);
+    /**
+     * Обёртку снимают сигналом — например, устаревший запуск statusline. Без пересылки исходная
+     * команда (медленный `git status`, `curl`) осталась бы работать сиротой.
+     */
+    const handleSignal = (signal: NodeJS.Signals) => {
+      child.kill(signal);
+    };
+
+    const cleanup = () => {
+      for (const name of FORWARDED_SIGNALS) process.removeListener(name, handleSignal);
+    };
+
+    for (const name of FORWARDED_SIGNALS) process.on(name, handleSignal);
+    child.once('error', (error) => {
+      cleanup();
+      reject(error);
+    });
     child.once('exit', (code) => {
+      cleanup();
       /**
        * Код 0 — успех команды, а не «кода нет»: `||` превратил бы его в 1.
        */

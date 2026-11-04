@@ -7,7 +7,7 @@ import * as state from '../state';
  */
 export * from '../../vendor/ccr/shared/src/codex-auth';
 export * from '../../vendor/ccr/shared/src/model-alias';
-export const HOME_DIR = state.runtime;
+export const HOME_DIR = state.RUNTIME_DIR;
 export const CLAUDE_PROJECTS_DIR = path.join(state.claudeConfigDir(), 'projects');
 /**
  * Значение upstream. Роутер сессии не регистрирует `@fastify/rate-limit`, поэтому лимит
