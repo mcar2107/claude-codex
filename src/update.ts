@@ -29,6 +29,7 @@ const DOWNLOAD_TIMEOUT_MS = 600_000;
 const SMOKE_TIMEOUT_MS = 30_000;
 
 const USAGE = 'Usage: claude-codex update [vX.Y.Z]';
+const RELEASES_API = `https://api.github.com/repos/${REPO}/releases`;
 
 const request = async (url: string, timeoutMs: number) => {
   const response = await fetch(url, {
@@ -47,24 +48,30 @@ const request = async (url: string, timeoutMs: number) => {
 };
 
 /**
- * `releases/latest` не отдаёт prerelease: без явного тега обновление ставит только стабильный
- * релиз.
+ * Канал обновления без тега — по запущенной версии. Prerelease (суффикс `-…`) берёт самый новый
+ * релиз вместе с prerelease, как `install.sh` по умолчанию; стабильная версия — только
+ * `releases/latest`, который prerelease не отдаёт.
  */
+export const latestReleaseUrl = (current: string) => {
+  return current.includes('-') ? `${RELEASES_API}?per_page=1` : `${RELEASES_API}/latest`;
+};
+
 const latestTag = async () => {
-  const response = await request(
-    `https://api.github.com/repos/${REPO}/releases/latest`,
-    API_TIMEOUT_MS
-  );
-  let release: unknown;
+  const response = await request(latestReleaseUrl(version), API_TIMEOUT_MS);
+  let body: unknown;
 
   try {
-    release = await response.json();
+    body = await response.json();
   } catch {
     /**
      * Не-JSON (страница прокси) — то же, что ответ без тега: ошибка ниже.
      */
   }
 
+  /**
+   * Список релизов приходит массивом, `releases/latest` — одним объектом.
+   */
+  const release: unknown = Array.isArray(body) ? body[0] : body;
   const tag = isRecord(release) ? release.tag_name : undefined;
 
   if (typeof tag !== 'string' || !RELEASE_TAG.test(tag)) {
@@ -148,6 +155,17 @@ export const installRelease = async ({
     return 0;
   }
 
+  /**
+   * Без тега обновление только повышает версию: понижение — лишь по явному тегу.
+   */
+  if (!tag && Bun.semver.order(next, version) < 0) {
+    console.log(
+      `claude-codex ${version} is newer than the latest release ${release}; pass a tag to downgrade.`
+    );
+
+    return 0;
+  }
+
   const base = `https://github.com/${REPO}/releases/download/${release}`;
   const archiveName = `${asset}.tar.gz`;
 
@@ -173,7 +191,10 @@ export const installRelease = async ({
     throw new Error(`Archive does not contain the ${EXECUTABLE} executable`);
   }
 
-  const temp = path.join(path.dirname(target), `.${EXECUTABLE}.new`);
+  /**
+   * PID в имени: два одновременных `update` не пишут и не запускают один и тот же файл.
+   */
+  const temp = path.join(path.dirname(target), `.${EXECUTABLE}.new.${process.pid}`);
 
   try {
     await Bun.write(temp, binary);
@@ -198,20 +219,27 @@ export const installRelease = async ({
 
   /**
    * Лицензии обновляются там, куда их положил `install.sh`; ручную установку без этого каталога
-   * команда не расширяет.
+   * команда не расширяет. Бинарник к этому моменту уже заменён, поэтому сбой записи — только
+   * предупреждение, а не провал обновления.
    */
   if (fs.existsSync(shareDir)) {
-    for (const [entry, file] of files) {
-      const name = path.posix.basename(entry);
+    try {
+      for (const [entry, file] of files) {
+        const name = path.posix.basename(entry);
 
-      if (entry === `${asset}/${name}` && name !== EXECUTABLE) {
-        await Bun.write(path.join(shareDir, name), file);
+        if (entry === `${asset}/${name}` && name !== EXECUTABLE) {
+          await Bun.write(path.join(shareDir, name), file);
+        }
       }
+    } catch (error) {
+      console.error(
+        `Warning: could not update license notices in ${shareDir}: ${error instanceof Error ? error.message : error}`
+      );
     }
   }
 
   console.log(
-    `Updated ${target}: ${version} -> ${next}. Running sessions keep ${version} until restarted.`
+    `Updated ${target}: ${version} -> ${next}. Restart running sessions: they keep ${version}, but their status line and /codex:* commands already run ${next}.`
   );
 
   return 0;

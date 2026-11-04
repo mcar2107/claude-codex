@@ -43,24 +43,10 @@ const fresh = {
 };
 
 /**
- * Вывод команды в тесте не нужен: проверяется результат в state, а не текст.
+ * Вывод команды в тесте не нужен: проверяется результат в state, а не текст. Асинхронная команда
+ * молчит до завершения промиса, а не до его создания, поэтому хелпер всегда ждёт результат.
  */
-const quietly = <T>(action: () => T): T => {
-  const { log } = console;
-
-  console.log = () => {};
-
-  try {
-    return action();
-  } finally {
-    console.log = log;
-  }
-};
-
-/**
- * `quietly` для асинхронной команды: вывод глушится до завершения промиса, а не до его создания.
- */
-const quietlyAsync = async <T>(action: () => Promise<T>): Promise<T> => {
+const quietly = async <T>(action: () => T | Promise<T>): Promise<T> => {
   const { log } = console;
 
   console.log = () => {};
@@ -196,11 +182,11 @@ try {
   assert.throws(() => {
     return settings(['preset', 'constructor']);
   }, /Unknown preset\. Choose sol\|balanced\|fast\|max/);
-  quietly(() => {
+  await quietly(() => {
     return settings(['preset', 'fast']);
   });
   assert.deepEqual(state.readSettings(), { model: 'gpt-6-luna', reasoningEffort: 'low' });
-  quietly(() => {
+  await quietly(() => {
     return settings(['set', '--effort', 'high']);
   });
   assert.deepEqual(
@@ -216,10 +202,10 @@ try {
     'high',
     'a rejected set keeps the file'
   );
-  quietly(() => {
+  await quietly(() => {
     return settings(['show']);
   });
-  quietly(() => {
+  await quietly(() => {
     return settings(['reset']);
   });
   assert.deepEqual(state.readSettings(), state.DEFAULT_SETTINGS);
@@ -967,12 +953,14 @@ try {
   /**
    * Релиз — архив со скриптом вместо бинарника: `--version` печатает версию, которую ему задали.
    */
-  const { installRelease } = await import('../src/update');
+  const { installRelease, latestReleaseUrl, update } = await import('../src/update');
   const { version: currentVersion } = (await import('../package.json')).default;
   const asset = 'claude-codex-test-x64';
   const installDir = path.join(fixture, 'bin');
   const target = path.join(installDir, 'claude-codex');
   const shareDir = path.join(fixture, 'share');
+  const missingShareDir = path.join(fixture, 'no-share');
+  const fileShareDir = path.join(fixture, 'share-file');
 
   const releaseArchive = async (reported: string) => {
     return new Bun.Archive(
@@ -984,7 +972,10 @@ try {
     ).bytes();
   };
 
-  const serveRelease = (archive: Uint8Array, sums: string) => {
+  /**
+   * Отвечает на оба канала: тесты идут и на prerelease-версии из `package.json`.
+   */
+  const serveRelease = (archive: Uint8Array, sums: string, latest = 'v9.9.9') => {
     const requested: string[] = [];
 
     mockFetch(async (url) => {
@@ -993,10 +984,14 @@ try {
       requested.push(href);
 
       if (href.endsWith('/releases/latest')) {
-        return Response.json({ tag_name: 'v9.9.9' });
+        return Response.json({ tag_name: latest });
       }
 
-      if (href.endsWith(`/v9.9.9/${asset}.tar.gz`)) {
+      if (href.endsWith('/releases?per_page=1')) {
+        return Response.json([{ tag_name: latest }]);
+      }
+
+      if (href.endsWith(`/${latest}/${asset}.tar.gz`)) {
         /**
          * Копия — `Uint8Array<ArrayBuffer>`: `bytes()` архива типизирован `ArrayBufferLike`, а его
          * `BodyInit` не принимает.
@@ -1004,7 +999,7 @@ try {
         return new Response(archive.slice());
       }
 
-      if (href.endsWith('/v9.9.9/SHA256SUMS')) {
+      if (href.endsWith(`/${latest}/SHA256SUMS`)) {
         return new Response(sums);
       }
 
@@ -1023,12 +1018,39 @@ try {
 
   fs.mkdirSync(installDir);
   fs.mkdirSync(shareDir);
+  fs.writeFileSync(fileShareDir, 'not a directory');
   fs.writeFileSync(target, 'old binary');
+  assert.match(latestReleaseUrl('1.0.0'), /\/releases\/latest$/);
+  assert.match(
+    latestReleaseUrl('1.1.0-dev.1'),
+    /\/releases\?per_page=1$/,
+    'a prerelease follows the newest release, as install.sh does'
+  );
 
   try {
+    await assert.rejects(update(['v1.0.0', 'v1.0.1']), /Usage: claude-codex update/);
+    await assert.rejects(update(['--force']), /Usage: claude-codex update/);
+
+    /**
+     * Скомпилированный тест сам standalone: там `update` заменил бы бинарник теста.
+     */
+    if (!state.isStandalone()) {
+      await assert.rejects(update([]), /replaces the standalone binary/);
+    }
+
+    const older = serveRelease(goodArchive, goodSums, 'v0.0.1');
+
+    assert.equal(
+      await quietly(() => {
+        return installRelease({ target, asset, shareDir });
+      }),
+      0
+    );
+    assert.equal(older.length, 1, 'an older latest release is not downloaded');
+    assert.equal(fs.readFileSync(target, 'utf8'), 'old binary');
     serveRelease(goodArchive, `${'0'.repeat(64)}  ${asset}.tar.gz\n`);
     await assert.rejects(
-      quietlyAsync(() => {
+      quietly(() => {
         return installRelease({ target, asset, shareDir });
       }),
       /Checksum mismatch/
@@ -1038,7 +1060,7 @@ try {
 
     serveRelease(wrongArchive, `${sha256(wrongArchive)}  ${asset}.tar.gz\n`);
     await assert.rejects(
-      quietlyAsync(() => {
+      quietly(() => {
         return installRelease({ target, asset, shareDir });
       }),
       /does not run as 9\.9\.9 \(reported 1\.2\.3\)/
@@ -1051,7 +1073,40 @@ try {
     );
     serveRelease(goodArchive, goodSums);
     assert.equal(
-      await quietlyAsync(() => {
+      await quietly(() => {
+        return installRelease({ target, asset, shareDir: missingShareDir });
+      }),
+      0
+    );
+    assert.equal(fs.readFileSync(target, 'utf8'), '#!/bin/sh\necho 9.9.9\n');
+    assert(!fs.existsSync(missingShareDir), 'a missing share directory is not created');
+    fs.writeFileSync(target, 'old binary');
+    serveRelease(goodArchive, goodSums);
+    const { error } = console;
+    const warnings: string[] = [];
+
+    console.error = (message: unknown) => {
+      warnings.push(String(message));
+    };
+
+    try {
+      assert.equal(
+        await quietly(() => {
+          return installRelease({ target, asset, shareDir: fileShareDir });
+        }),
+        0,
+        'a failed license refresh does not fail the update'
+      );
+    } finally {
+      console.error = error;
+    }
+
+    assert.match(warnings.join('\n'), /could not update license notices/);
+    assert.equal(fs.readFileSync(target, 'utf8'), '#!/bin/sh\necho 9.9.9\n');
+    fs.writeFileSync(target, 'old binary');
+    serveRelease(goodArchive, goodSums);
+    assert.equal(
+      await quietly(() => {
         return installRelease({ target, asset, shareDir });
       }),
       0
@@ -1068,7 +1123,7 @@ try {
     );
     const sameVersion = serveRelease(goodArchive, goodSums);
 
-    await quietlyAsync(() => {
+    await quietly(() => {
       return installRelease({ tag: `v${currentVersion}`, target, asset, shareDir });
     });
     assert.deepEqual(sameVersion, [], 'the current version is not downloaded');
@@ -1081,7 +1136,7 @@ try {
   }
 
   console.log(
-    'PASS: update installs the latest release only after SHA256 and --version checks; failures keep the old binary.'
+    'PASS: update installs the latest release of its channel only after SHA256 and --version checks, never downgrades without a tag, refreshes licenses only in an existing share directory and only warns if that fails; failures keep the old binary; bad arguments are rejected.'
   );
 } finally {
   fs.rmSync(fixture, { recursive: true, force: true });
