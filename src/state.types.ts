@@ -34,6 +34,26 @@ export type SettingsInput = {
 };
 
 /**
+ * Снимок discovery моделей аккаунта (`models.json`) — не учётные данные и не гарантия доступа.
+ */
+export type ModelsCache = {
+  /**
+   * Время запроса discovery, ISO 8601; пустая строка — кэша нет.
+   */
+  refreshedAt: string;
+
+  /**
+   * ID моделей, которые вернул Codex для аккаунта.
+   */
+  models: string[];
+
+  /**
+   * Окно контекста в токенах по ID модели — только для моделей, о которых Codex его сообщил.
+   */
+  contextWindows: Record<string, number>;
+};
+
+/**
  * OAuth-файл state-каталога — формат, который читает хелпер обновления токена CCR.
  */
 export type AuthFile = {

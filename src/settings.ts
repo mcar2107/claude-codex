@@ -1,9 +1,6 @@
-import fs from 'node:fs';
-import path from 'node:path';
-
 import { parseOverrides } from './session';
 import * as state from './state';
-import type { Settings } from './state.types';
+import type { ModelsCache, Settings } from './state.types';
 
 const PRESETS: Record<string, Settings> = {
   sol: state.defaults,
@@ -21,23 +18,26 @@ const show = () => {
 };
 
 /**
- * Элементы ответа discovery: у одних версий API ID в `slug`, у других — в `id`.
+ * Элементы ответа discovery: у одних версий API ID в `slug`, у других — в `id`. Окно контекста
+ * берётся, только если Codex его сообщил: своих оценок окна мост не делает.
  */
-const modelIds = (items: unknown[]) => {
-  return [
-    ...new Set(
-      items.reduce<string[]>((ids, item) => {
-        const id =
-          typeof item === 'object' && item !== null
-            ? Reflect.get(item, 'slug') || Reflect.get(item, 'id')
-            : undefined;
+const discoveryCache = (items: unknown[]) => {
+  return items.reduce<Omit<ModelsCache, 'refreshedAt'>>(
+    (cache, item) => {
+      if (typeof item !== 'object' || item === null) return cache;
+      const id = Reflect.get(item, 'slug') || Reflect.get(item, 'id');
 
-        if (typeof id === 'string' && /^gpt-[a-z0-9][a-z0-9.-]*$/.test(id)) ids.push(id);
+      if (!state.isModelId(id) || cache.models.includes(id)) return cache;
+      cache.models.push(id);
+      const size =
+        Reflect.get(item, 'context_window') || Reflect.get(item, 'max_context_window');
 
-        return ids;
-      }, [])
-    ),
-  ];
+      if (Number.isInteger(size) && size > 0) cache.contextWindows[id] = size;
+
+      return cache;
+    },
+    { models: [], contextWindows: {} }
+  );
 };
 
 export const settings = (args: string[]) => {
@@ -65,8 +65,6 @@ export const settings = (args: string[]) => {
 };
 
 export const models = async (args: string[]) => {
-  const cache = path.join(state.runtime, 'models.json');
-
   if (args.length && (args.length !== 1 || args[0] !== 'refresh'))
     throw new Error('Usage: claude-codex models [refresh]');
 
@@ -104,19 +102,24 @@ export const models = async (args: string[]) => {
         'Unexpected model discovery response; saved settings and cache preserved'
       );
 
-    state.writeJson(cache, {
+    state.writeJson(state.modelsCacheFile, {
       refreshedAt: new Date().toISOString(),
-      models: modelIds(items),
+      ...discoveryCache(items),
     });
   }
 
-  if (fs.existsSync(cache)) {
-    const cached = JSON.parse(fs.readFileSync(cache, 'utf8'));
+  const cached = state.readModelsCache();
 
+  if (cached.refreshedAt) {
     console.log(
       `Discovered for this OAuth account (${cached.refreshedAt}; requests remain the definitive access check):`
     );
-    for (const model of cached.models) console.log(model);
+
+    for (const model of cached.models) {
+      const size = cached.contextWindows[model];
+
+      console.log(size ? `${model} (context ${size})` : model);
+    }
   }
 
   console.log('Configured candidates (not a promise of account access):');

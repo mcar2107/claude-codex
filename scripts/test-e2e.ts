@@ -17,18 +17,23 @@ const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-codex-e2e-'));
 
 /**
  * Фейковый клиент Claude: пишет адрес роутера и ответ count_tokens в файл `--record`; с `--hold`
- * живёт до SIGTERM. Проверяет, что мост вычистил чужие учётные данные из окружения.
+ * живёт до SIGTERM. Проверяет, что мост вычистил чужие учётные данные из окружения, передал
+ * плагин сессии и положил `claude-codex` в PATH.
  */
 const FAKE_CLAUDE = `#!/bin/sh
 record=
 hold=no
+plugin=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --record) record="$2"; shift ;;
+    --plugin-dir) plugin="$2"; shift ;;
     --hold) hold=yes ;;
   esac
   shift
 done
+[ -f "$plugin/commands/settings.md" ] || exit 85
+claude-codex --version > "$record.shim" || exit 84
 [ -z "$CLAUDE_CODE_USE_BEDROCK" ] || exit 89
 [ -z "$ANTHROPIC_API_KEY" ] || exit 88
 [ -n "$record" ] || exit 87
@@ -145,6 +150,7 @@ const exercise = async (cli: string, isStandalone: boolean) => {
 
   assert.equal(result.code, 7, result.output);
   assert(JSON.parse(fs.readFileSync(one + '.tokens', 'utf8')).input_tokens > 0);
+  assert(fs.readFileSync(one + '.shim', 'utf8').includes(packageJson.version));
   assert(!sessions(state).length, 'session must be cleaned after Claude exit');
   const aFile = path.join(state, 'a'),
     bFile = path.join(state, 'b');
@@ -189,7 +195,7 @@ try {
   run(process.execPath, [path.join(root, 'scripts/build.ts')]);
   await exercise(path.join(root, 'dist/cli.js'), false);
   console.log(
-    'PASS: bundled CLI launches its own local router + WASM, client exit status, concurrent sessions, termination and session cleanup.'
+    'PASS: bundled CLI launches its own local router + WASM, session plugin and PATH shim, client exit status, concurrent sessions, termination and session cleanup.'
   );
   const native = path.join(
     root,
@@ -206,7 +212,7 @@ try {
   fs.chmodSync(copied, 0o755);
   await exercise(copied, true);
   console.log(
-    'PASS: relocated native standalone launches its own router and embedded WASM with no Node/Bun in PATH, using a fake external Claude client.'
+    'PASS: relocated native standalone launches its own router, embedded WASM, session plugin and PATH shim with no Node/Bun in PATH, using a fake external Claude client.'
   );
 } finally {
   fs.rmSync(temp, { recursive: true, force: true });

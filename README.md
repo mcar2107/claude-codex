@@ -72,7 +72,7 @@ configuration.
 For standalone, use `artifacts/bun-<os>-<arch>/claude-codex`.
 The adjacent license files belong with the binary when redistributing it. You
 can relocate it; no project path or runtime assets need to be installed beside
-it. Add it to `PATH` if using the optional slash commands.
+it.
 
 ## Authentication and state
 
@@ -107,8 +107,11 @@ Files are private (`0600`) and new state/session directories are `0700`:
   and a cross-process refresh lock.
 - `settings.json`: saved model and reasoning effort, atomically replaced.
 - `models.json`: optional account discovery cache, not credentials.
-- `session-*`: transient per-session router PID/base URL/start-time metadata.
-  Session API keys are random and are not written to this metadata.
+- `session-*`: transient per-session router PID/base URL/start-time metadata,
+  the session's Claude settings file, plugin, `claude-codex` launcher, status
+  line wrapper data, latest Codex limit snapshot and last request record
+  (models and effort only, no prompts). Session API keys are
+  random and are not written to any of these files.
 
 Each launch owns its own child router, ephemeral loopback port and API key.
 The router binds port zero directly; there is no probe-and-rebind port race.
@@ -132,18 +135,57 @@ claude-codex --model gpt-6-astra --effort high
 claude-codex -p 'Your prompt'
 ```
 
-Defaults are `gpt-6.1-sol` / `high`. Settings are read before **every request**,
-including in already-open sessions. Precedence is:
+Defaults are `gpt-6.1-sol` / `high`. Saved settings, flags and environment pick
+the **starting** model and effort of a session. Precedence is:
 
 1. Explicit session `--model` / `--effort` flags.
 2. `CLAUDE_CODEX_MODEL` / `CLAUDE_CODEX_EFFORT` environment variables.
 3. Saved settings, falling back to defaults when no file exists.
 
 Overrides do not modify saved settings. `--` stops bridge flag parsing; use it
-only when deliberately passing flags through to Claude. The startup alias in
-Claude remains `codex,gpt-6.1-sol`; it is **not verification of the actual upstream
-model**. Live settings select the outgoing model. Use `doctor` for a real request
-with the active model and to inspect the reported model.
+only when deliberately passing flags through to Claude.
+
+Inside a session, switch with Claude Code's own `/model` and `/effort`. The
+`/model` picker lists only Codex models (`codex,gpt-…`, labeled `GPT-6.1 Sol`
+and so on; Claude's built-in rows are hidden), passed to Claude through a
+session-only `--settings` file. The router takes the model and effort from each
+request; a request without a Codex model (a Claude alias, a background task)
+uses the starting model, and a request without effort uses the saved level.
+An effort the model does not support is lowered to the nearest supported level
+(for example `max` → `xhigh` on GPT-5.5). Changing saved settings from another
+terminal no longer affects open sessions.
+
+In `/model`, **Enter** saves the choice as Claude Code's default in
+`~/.claude/settings.json` (`CLAUDE_CONFIG_DIR`), while **`s`** switches only the
+current session. Plain `claude` would then start with a Codex model, so on exit
+the bridge restores the previous `model` value when the session replaced it with
+a `codex,…` ID, and prints what it changed. Any other edit of that file is left
+alone. A session killed with SIGKILL cannot restore it; the next launch warns
+when that file already holds a Codex model. `/effort` levels are saved by
+Claude Code per model ID, so they do not affect Claude models.
+
+The model label in Claude, and what the model says about itself, are **not
+verification of the actual upstream model**. To check what a running session
+really sends, read its last request record from another terminal:
+
+```sh
+cat ~/.claude-codex/session-*/last-request.json
+```
+
+```json
+{
+  "at": "2026-11-04T15:39:12.000Z",
+  "client": { "model": "codex,gpt-6-luna", "effort": "low" },
+  "upstream": { "model": "gpt-6-luna", "effort": "low" },
+  "returnedModel": "gpt-6-luna"
+}
+```
+
+`client` is what Claude Code sent, `upstream` is what the bridge sent to Codex
+after choosing the model and lowering the effort, and `returnedModel` is
+`response.model` from the first event of the Codex stream. Background requests
+(titles, summaries) also update the file, so look at it right after your own
+message. Use `doctor` for a one-off real request with the starting model.
 
 For GPT-6/5.6 this transport permits `low`, `medium`, `high`, `xhigh`, `max`;
 `none`/`minimal` are rejected because the pinned Codex transport would clamp them
@@ -160,22 +202,59 @@ claude-codex models refresh  # real account-authenticated discovery request
 Configured candidates are not an entitlement or access check. Discovery is an
 account snapshot; a real request is still definitive. Refresh preserves settings
 and the previous cache on failure. It may refresh the OAuth token as needed.
+Discovered models are added to the `/model` picker. When discovery reports a
+model's context window, a session started on that model sets
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS` (unless already set), so Claude Code's context
+percentage and auto-compaction use the real window; otherwise Claude Code
+assumes 200k. The value is fixed at launch and does not follow `/model`.
 
-## Optional slash commands
+## Session commands
 
-```sh
-claude-codex setup
-# /codex-settings show
-# /codex-model gpt-6.1-sol
-# /codex-effort high
-claude-codex setup --remove
+Every session loads a session-only plugin (`--plugin-dir`) from its private
+session directory, so these commands are available without any setup and exist
+only inside claude-codex sessions:
+
+```text
+/codex:settings show
+/codex:settings preset fast
+/codex:settings set --model gpt-6-astra --effort max
+/codex:models refresh
 ```
 
-Setup is explicit and installs only these names, under the Claude configuration
-commands directory (`CLAUDE_CONFIG_DIR` or `~/.claude`). It refuses to replace or
-remove modified/foreign files and is idempotent. Claude sessions launched by the
-bridge inherit the selected state directory, so slash commands update the same
-state. The CLI must be in `PATH`.
+They change the saved defaults for new sessions; switch the current session
+with `/model` and `/effort`. A `claude-codex` launcher for the session is put
+first in the client's `PATH`, so the commands work even when the bridge itself
+is not in `PATH`. Nothing is written to the Claude configuration directory.
+
+Earlier versions installed global `/codex-settings`, `/codex-model` and
+`/codex-effort` commands with `claude-codex setup`. Remove them with
+`claude-codex setup --remove`; it refuses to delete modified or foreign files.
+
+## Status line
+
+Claude Code fills `rate_limits` in the status line JSON only for claude.ai
+subscription and Claude apps gateway sign-ins; behind a custom
+`ANTHROPIC_BASE_URL` it ignores rate limit headers. The bridge therefore keeps
+the latest Codex limits from the upstream response headers in the session
+directory and, when a `statusLine` command is configured, wraps it for this
+session: the wrapper adds `rate_limits.five_hour` / `rate_limits.seven_day`
+(`used_percentage`, `resets_at`) in the same schema Claude Code uses for
+subscriptions and runs your command unchanged with that JSON. Scripts that do
+not read `rate_limits` behave exactly as before; with no `statusLine`, nothing
+is wrapped. Windows that already reset are dropped, and `rate_limits` sent by
+Claude itself are never overwritten.
+
+The wrapped command is the one Claude Code would use: from `--settings`, then
+`.claude/settings.local.json` and `.claude/settings.json` in the current
+directory, then user settings. A `statusLine` in managed settings is not
+wrapped, since it takes precedence over the session flag anyway. Your own
+`--settings` (JSON or file) is merged into the session settings file.
+
+Codex limits are read from `x-codex-primary-*` / `x-codex-secondary-*`
+response headers (`used-percent`, `window-minutes`, `reset-at` or
+`reset-after-seconds`); 300-minute and 10080-minute windows map to `five_hour`
+and `seven_day`. These header names have not yet been confirmed against a real
+Codex response; when they are absent, no `rate_limits` are added.
 
 ## Transport and builds
 
@@ -247,7 +326,9 @@ token is read. Coverage includes settings/override validation, five model IDs
 without restarting the handler, Responses Lite, tool call/result conversion,
 incremental SSE, a real loopback client's cancellation of a mocked upstream
 stream, provider errors, clean PKCE callback, invalid state, timeout cleanup,
-mocked token refresh/deduplication and safe slash setup.
+mocked token refresh/deduplication, client-selected model/effort, Codex limit
+snapshots and the status line wrapper, session plugin and settings, restoring
+a Codex `model` in user settings, and safe removal of legacy slash commands.
 The compiled harness runs those same scenarios with no Node/Bun in PATH.
 
 End-to-end tests run both `dist/cli.js` and the relocated native standalone
@@ -276,7 +357,7 @@ external state directory. Review model/transport
 compatibility before upgrading.
 
 ```sh
-claude-codex setup --remove   # only if setup was used
+claude-codex setup --remove   # only if an earlier version's setup was used
 ```
 
 Then remove the executable and its accompanying notices (installer defaults:

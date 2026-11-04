@@ -6,11 +6,10 @@ import { internalRouter, parseOverrides, spawnClient, withRouter } from './sessi
 import * as state from './state';
 
 const { version } = packageJson;
-const CLIENT_MODEL = 'codex,gpt-6.1-sol';
 
 const help = () => {
   console.log(
-    `claude-codex ${version} — Claude Code → Codex OAuth\n\nUsage:\n  claude-codex [launch] [--model GPT-ID] [--effort LEVEL] [Claude Code arguments]\n  claude-codex auth login|status\n  claude-codex doctor [--model GPT-ID] [--effort LEVEL]\n  claude-codex settings show|set|reset|preset\n  claude-codex models [refresh]\n  claude-codex setup [--remove]\n\nState: ${state.runtime}\nRequires Bun >=1.4.0 for the bundled CLI and a separately installed Claude Code.\nModel/effort overrides last for this session. Use -- to stop parsing bridge flags.\nUse doctor for a real upstream check. Candidate model names do not prove access.`
+    `claude-codex ${version} — Claude Code → Codex OAuth\n\nUsage:\n  claude-codex [launch] [--model GPT-ID] [--effort LEVEL] [Claude Code arguments]\n  claude-codex auth login|status\n  claude-codex doctor [--model GPT-ID] [--effort LEVEL]\n  claude-codex settings show|set|reset|preset\n  claude-codex models [refresh]\n  claude-codex setup --remove\n\nState: ${state.runtime}\nRequires Bun >=1.4.0 for the bundled CLI and a separately installed Claude Code.\nFlags and saved settings pick the starting model/effort; switch in a session with /model and /effort.\nSession commands: /codex:settings, /codex:models. Use -- to stop parsing bridge flags.\nUse doctor for a real upstream check. Candidate model names do not prove access.`
   );
 };
 
@@ -31,9 +30,10 @@ const doctor = async (args: string[]) => {
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify({
-        model: CLIENT_MODEL,
+        model: state.CLIENT_PREFIX + active.model,
         max_tokens: 1024,
         stream: false,
+        output_config: { effort: active.reasoningEffort },
         messages: [{ role: 'user', content: 'Reply with exactly: ok' }],
       }),
       signal: AbortSignal.any([signal, AbortSignal.timeout(130000)]),
@@ -77,9 +77,9 @@ const auth = async (args: string[]) => {
 const launch = (args: string[]) => {
   const { overrides, rest: clientArgs } = parseOverrides(args);
 
-  return withRouter(overrides, async ({ base, key, active, env, signal }) => {
+  return withRouter(overrides, async ({ base, key, session, active, env, signal }) => {
     console.error(
-      `${active.model} ${active.reasoningEffort} via Codex OAuth. Claude's startup alias is not upstream model verification.`
+      `${active.model} ${active.reasoningEffort} via Codex OAuth. Switch with /model and /effort; claude-codex settings are defaults for new sessions.`
     );
     for (const name of [
       'ANTHROPIC_API_KEY',
@@ -93,19 +93,26 @@ const launch = (args: string[]) => {
       delete env[name];
     env.ANTHROPIC_BASE_URL = base;
     env.ANTHROPIC_AUTH_TOKEN = key;
-    for (const name of [
-      'ANTHROPIC_MODEL',
-      'ANTHROPIC_DEFAULT_HAIKU_MODEL',
-      'ANTHROPIC_DEFAULT_SONNET_MODEL',
-      'ANTHROPIC_DEFAULT_OPUS_MODEL',
-    ])
-      env[name] = CLIENT_MODEL;
+    const { isClientModel, prepareClient, restoreUserModel, snapshotUserModel } =
+      await import('./client');
+    const snapshot = snapshotUserModel();
 
-    return spawnClient(
-      'claude',
-      ['--model', CLIENT_MODEL, '--effort', active.reasoningEffort, ...clientArgs],
-      { env, signal }
-    );
+    if (snapshot?.hasModel && isClientModel(snapshot.model))
+      console.error(
+        `Warning: "model" in ${snapshot.file} is ${snapshot.model}; plain claude will start with a Codex model. Remove it or pick a Claude model with /model.`
+      );
+
+    try {
+      return await spawnClient(
+        'claude',
+        prepareClient({ session, active, clientArgs, env }),
+        { env, signal }
+      );
+    } finally {
+      const restored = restoreUserModel(snapshot);
+
+      if (restored) console.error(restored);
+    }
   });
 };
 
@@ -142,6 +149,10 @@ const main = async (args: string[]): Promise<number | void> => {
 
     case 'models': {
       return (await import('./settings')).models(rest);
+    }
+
+    case '__statusline': {
+      return (await import('./statusline')).statusline(rest[0]);
     }
 
     case 'setup': {

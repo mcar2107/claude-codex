@@ -41,9 +41,12 @@ src/
   session.ts              сессия: свой роутер на порту с ключом, запуск клиента, завершение
   state.ts                state-каталог (~/.claude-codex, CLAUDE_CODEX_STATE_DIR), настройки, OAuth-файл
   auth.ts                 PKCE OAuth login, status
-  settings.ts setup.ts    настройки и модели, slash-команды /codex-*
+  settings.ts             настройки и модели, discovery
+  client.ts               подготовка клиента: модели в /model, --settings, плагин /codex:*, statusLine, model в ~/.claude
+  statusline.ts           обёртка statusLine: rate_limits Codex в JSON statusline
+  setup.ts                удаление глобальных /codex-* (setup --remove)
   *.types.ts              типы модуля рядом с ним (typescript.md)
-  transport/              адаптер к vendor/ccr: сервер Fastify и подмены модулей upstream (vendor.md)
+  transport/              адаптер к vendor/ccr: сервер Fastify, лимиты Codex (limits.ts), подмены модулей upstream (vendor.md)
 vendor/ccr/               исходники CCR upstream байт в байт — не править (vendor.md)
 scripts/                  сборка (build.ts — плагин подмен), standalone, лицензии, тест-раннеры
 tests/offline.ts          офлайн-тесты нового CLI (testing.md)

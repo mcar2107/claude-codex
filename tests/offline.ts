@@ -144,6 +144,7 @@ try {
   let output: ResponseOutputItem[] | undefined;
   let upstreamError: number | undefined;
   let cancellationProbe: CancellationProbe | undefined;
+  let limitHeaders: Record<string, string> = {};
 
   mockFetch(async (url, opts) => {
     assert(
@@ -199,7 +200,7 @@ try {
 
     return new Response(
       output ? sse('response.completed', { response }) : streamFrames(response).join(''),
-      { headers: { 'Content-Type': 'text/event-stream' } }
+      { headers: { 'Content-Type': 'text/event-stream', ...limitHeaders } }
     );
   });
 
@@ -209,7 +210,9 @@ try {
     return captured;
   };
 
-  const app = await createRouter({ key: 'test-key' });
+  const limitsFile = path.join(fixture, 'session-test', 'rate-limits.json');
+  const requestFile = path.join(fixture, 'session-test', 'last-request.json');
+  const app = await createRouter({ key: 'test-key', limitsFile, requestFile });
   const headers = { 'x-api-key': 'test-key', 'anthropic-version': '2023-06-01' };
   const request = {
     model: 'codex,gpt-6.1-sol',
@@ -241,6 +244,8 @@ try {
     assert.equal(counted.statusCode, 200, counted.body);
     assert(counted.json().input_tokens > 0);
 
+    state.saveSettings({ model: 'gpt-6-luna', reasoningEffort: 'low' });
+
     for (const [model, reasoningEffort] of [
       ['gpt-6.1-sol', 'xhigh'],
       ['gpt-6-astra', 'max'],
@@ -248,12 +253,15 @@ try {
       ['gpt-6-luna', 'high'],
       ['gpt-future-test', 'high'],
     ]) {
-      state.saveSettings({ model, reasoningEffort });
       const result = await app.inject({
         method: 'POST',
         url: '/v1/messages',
         headers,
-        payload: request,
+        payload: {
+          ...request,
+          model: `codex,${model}`,
+          output_config: { effort: reasoningEffort },
+        },
       });
       const sent = lastRequest();
 
@@ -272,13 +280,56 @@ try {
       assert.equal(result.json().content[0].text, 'ok');
     }
 
+    /**
+     * Не модель Codex и без effort — модель и уровень из настроек моста.
+     */
+    const fallback = await app.inject({
+      method: 'POST',
+      url: '/v1/messages',
+      headers,
+      payload: { ...request, model: 'claude-haiku-4-5' },
+    });
+
+    assert.equal(fallback.statusCode, 200, fallback.body);
+    assert.equal(lastRequest().model, 'gpt-6-luna');
+    assert.equal(lastRequest().reasoning.effort, 'low');
+    const clamped = await app.inject({
+      method: 'POST',
+      url: '/v1/messages',
+      headers,
+      payload: { ...request, model: 'codex,gpt-5.5', output_config: { effort: 'max' } },
+    });
+
+    assert.equal(clamped.statusCode, 200, clamped.body);
+    assert.equal(lastRequest().model, 'gpt-5.5');
+    assert.equal(
+      lastRequest().reasoning.effort,
+      'xhigh',
+      'unsupported max falls back to xhigh'
+    );
+
+    const readLastRequest = () => {
+      return JSON.parse(fs.readFileSync(requestFile, 'utf8'));
+    };
+
+    const returnedBy = Date.now() + 2000;
+
+    while (!readLastRequest().returnedModel && Date.now() < returnedBy)
+      await new Promise((resolve) => {
+        return setTimeout(resolve, 10);
+      });
+    const lastRecord = readLastRequest();
+
+    assert.deepEqual(lastRecord.client, { model: 'codex,gpt-5.5', effort: 'max' });
+    assert.deepEqual(lastRecord.upstream, { model: 'gpt-5.5', effort: 'xhigh' });
+    assert.equal(lastRecord.returnedModel, 'gpt-5.5', 'model from the Codex response');
     process.env.CLAUDE_CODEX_MODEL = 'gpt-6-astra';
     process.env.CLAUDE_CODEX_EFFORT = 'max';
     const overridden = await app.inject({
       method: 'POST',
       url: '/v1/messages',
       headers,
-      payload: request,
+      payload: { ...request, model: 'sonnet' },
     });
 
     assert.equal(overridden.statusCode, 200);
@@ -286,6 +337,34 @@ try {
     assert.equal(lastRequest().reasoning.effort, 'max');
     delete process.env.CLAUDE_CODEX_MODEL;
     delete process.env.CLAUDE_CODEX_EFFORT;
+    assert(!fs.existsSync(limitsFile), 'no Codex limit headers, no snapshot');
+    const now = Math.floor(Date.now() / 1000);
+
+    limitHeaders = {
+      'x-codex-primary-used-percent': '42.5',
+      'x-codex-primary-window-minutes': '300',
+      'x-codex-primary-reset-at': String(now + 3600),
+      'x-codex-secondary-used-percent': '7',
+      'x-codex-secondary-window-minutes': '10080',
+      'x-codex-secondary-reset-after-seconds': '86400',
+    };
+    const limited = await app.inject({
+      method: 'POST',
+      url: '/v1/messages',
+      headers,
+      payload: request,
+    });
+
+    assert.equal(limited.statusCode, 200, limited.body);
+    const snapshot = JSON.parse(fs.readFileSync(limitsFile, 'utf8'));
+
+    assert.deepEqual(snapshot.five_hour, {
+      used_percentage: 42.5,
+      resets_at: now + 3600,
+    });
+    assert.equal(snapshot.seven_day.used_percentage, 7);
+    assert(Math.abs(snapshot.seven_day.resets_at - (now + 86400)) <= 2);
+    limitHeaders = {};
     output = [
       {
         id: 'fc_1',
@@ -368,7 +447,7 @@ try {
     assert(bad.statusCode >= 400, bad.body);
     upstreamError = undefined;
     console.log(
-      'PASS: actual source-backed CCR, 5 hot-switched model IDs, overrides, Responses Lite, tools/results, incremental SSE, auth and provider errors (mock upstream).'
+      'PASS: actual source-backed CCR, client-selected model/effort for 5 IDs, settings fallback, effort clamping, overrides, Codex limit snapshot, last request record with the returned model, Responses Lite, tools/results, incremental SSE, auth and provider errors (mock upstream).'
     );
     const probe: CancellationProbe = { isAborted: false, isCancelled: false };
 
@@ -480,23 +559,225 @@ try {
   console.log(
     'PASS: CCR refresh helper deduplicates simultaneous refresh and atomically persists rotation (mock endpoint).'
   );
-  const commands = path.join(fixture, 'claude');
+  const claudeDir = path.join(fixture, 'claude');
 
-  process.env.CLAUDE_CONFIG_DIR = commands;
+  process.env.CLAUDE_CONFIG_DIR = claudeDir;
   const { setup } = await import('../src/setup');
 
-  setup([]);
-  setup([]);
-  setup(['--remove']);
-  fs.writeFileSync(path.join(commands, 'commands', 'codex-model.md'), 'foreign command');
   assert.throws(() => {
     return setup([]);
+  }, /setup --remove/);
+  setup(['--remove']);
+  fs.mkdirSync(path.join(claudeDir, 'commands'), { recursive: true });
+  fs.writeFileSync(path.join(claudeDir, 'commands', 'codex-model.md'), 'foreign command');
+  assert.throws(() => {
+    return setup(['--remove']);
   }, /foreign command/);
   assert.equal(
-    fs.readFileSync(path.join(commands, 'commands', 'codex-model.md'), 'utf8'),
+    fs.readFileSync(path.join(claudeDir, 'commands', 'codex-model.md'), 'utf8'),
     'foreign command'
   );
-  console.log('PASS: slash setup is idempotent and preserves foreign commands.');
+  console.log('PASS: legacy slash removal preserves foreign commands.');
+  const { codexRateLimits } = await import('../src/transport/limits');
+  const { withRateLimits } = await import('../src/statusline');
+
+  assert.equal(codexRateLimits(new Headers()), undefined);
+  assert.deepEqual(
+    codexRateLimits(
+      new Headers({
+        'x-codex-primary-used-percent': '10',
+        'x-codex-secondary-used-percent': '20',
+        'x-codex-secondary-window-minutes': '60',
+      })
+    ),
+    { five_hour: { used_percentage: 10 } },
+    'a window without a statusline slot is skipped'
+  );
+  const { responseEvent } = await import('../src/transport/last-request');
+
+  assert.equal(responseEvent('event: x\ndata: {"type":"ping"}\n'), undefined);
+  assert.deepEqual(
+    responseEvent(
+      'data: {"type":"response.created","response":{"model":"gpt-6-luna"}}\n'
+    ),
+    { model: 'gpt-6-luna' }
+  );
+  assert.deepEqual(responseEvent('data: {"response":{}}\n'), { model: undefined });
+  assert.equal(responseEvent('data: {"response":{"mod'), undefined, 'partial line waits');
+  const statusInput = JSON.stringify({ model: { display_name: 'GPT-6.1 Sol' } });
+  const nowMs = Date.now();
+  const augmented = JSON.parse(
+    withRateLimits(
+      statusInput,
+      {
+        five_hour: { used_percentage: 50, resets_at: nowMs / 1000 + 60 },
+        seven_day: { used_percentage: 5, resets_at: nowMs / 1000 - 60 },
+      },
+      nowMs
+    )
+  );
+
+  assert.equal(augmented.model.display_name, 'GPT-6.1 Sol');
+  assert.equal(augmented.rate_limits.five_hour.used_percentage, 50);
+  assert.equal(augmented.rate_limits.seven_day, undefined, 'a reset window is stale');
+  assert.equal(withRateLimits(statusInput, undefined), statusInput);
+  assert.equal(
+    withRateLimits('not json', { five_hour: { used_percentage: 1 } }),
+    'not json'
+  );
+  const ownLimits = JSON.stringify({
+    rate_limits: { five_hour: { used_percentage: 99 } },
+  });
+
+  assert.equal(
+    withRateLimits(ownLimits, { five_hour: { used_percentage: 1 } }),
+    ownLimits
+  );
+  console.log(
+    'PASS: Codex limit headers map to statusline rate_limits; stale windows and client limits are respected.'
+  );
+  const client = await import('../src/client');
+
+  assert.equal(client.modelLabel('gpt-6.1-sol'), 'GPT-6.1 Sol');
+  assert.equal(client.modelLabel('gpt-5.3-codex-spark'), 'GPT-5.3 Codex Spark');
+  assert.deepEqual(client.extractSettings(['-p', 'hi', '--settings={"a":1}']), {
+    settings: { a: 1 },
+    rest: ['-p', 'hi'],
+  });
+  assert.throws(() => {
+    return client.extractSettings(['--settings', '[1]']);
+  }, /--settings/);
+  const project = path.join(fixture, 'project');
+
+  fs.mkdirSync(path.join(project, '.claude'), { recursive: true });
+  fs.mkdirSync(claudeDir, { recursive: true });
+  const userSettings = path.join(claudeDir, 'settings.json');
+
+  fs.writeFileSync(
+    userSettings,
+    JSON.stringify({
+      model: 'opus',
+      theme: 'dark',
+      statusLine: { type: 'command', command: 'echo user', padding: 1 },
+    }),
+    { mode: 0o644 }
+  );
+  assert.equal(
+    client.resolveStatusLine(undefined, project, claudeDir)?.command,
+    'echo user'
+  );
+  fs.writeFileSync(
+    path.join(project, '.claude', 'settings.local.json'),
+    JSON.stringify({ statusLine: { type: 'command', command: 'echo local' } })
+  );
+  assert.equal(
+    client.resolveStatusLine(undefined, project, claudeDir)?.command,
+    'echo local'
+  );
+  assert.equal(
+    client.resolveStatusLine(
+      { statusLine: { type: 'command', command: 'echo flag' } },
+      project,
+      claudeDir
+    )?.command,
+    'echo flag'
+  );
+  fs.rmSync(path.join(project, '.claude', 'settings.local.json'));
+  const session = fs.mkdtempSync(path.join(fixture, 'session-'));
+  const clientEnv: NodeJS.ProcessEnv = { PATH: '/usr/bin', ANTHROPIC_MODEL: 'opus' };
+  const clientArgs = client.prepareClient({
+    session,
+    active: { model: 'gpt-6-astra', reasoningEffort: 'max' },
+    clientArgs: ['-p', 'hi', '--settings', '{"theme":"light"}'],
+    env: clientEnv,
+    cwd: project,
+  });
+
+  assert.deepEqual(clientArgs.slice(-4), ['--effort', 'max', '-p', 'hi']);
+  assert.equal(clientArgs[clientArgs.indexOf('--model') + 1], 'codex,gpt-6-astra');
+  const clientSettings = JSON.parse(
+    fs.readFileSync(clientArgs[clientArgs.indexOf('--settings') + 1], 'utf8')
+  );
+
+  assert.equal(clientSettings.theme, 'light');
+  assert.equal(clientSettings.modelPicker.replaceBuiltInOptions, true);
+  assert(
+    clientSettings.modelPicker.options.every((row: unknown) => {
+      return (
+        typeof row === 'object' &&
+        row !== null &&
+        String(Reflect.get(row, 'model')).startsWith('codex,gpt-')
+      );
+    })
+  );
+  assert.equal(clientSettings.statusLine.padding, 1);
+  assert(clientSettings.statusLine.command.includes('__statusline'));
+  assert.equal(
+    JSON.parse(fs.readFileSync(path.join(session, 'statusline.json'), 'utf8')).command,
+    'echo user'
+  );
+  const plugin = clientArgs[clientArgs.indexOf('--plugin-dir') + 1];
+
+  assert.equal(
+    JSON.parse(
+      fs.readFileSync(path.join(plugin, '.claude-plugin', 'plugin.json'), 'utf8')
+    ).name,
+    'codex'
+  );
+  assert(fs.existsSync(path.join(plugin, 'commands', 'settings.md')));
+  assert(clientEnv.PATH?.startsWith(path.join(session, 'bin')));
+  assert.equal(
+    fs.statSync(path.join(session, 'bin', 'claude-codex')).mode & 0o100,
+    0o100
+  );
+  assert.equal(clientEnv.ANTHROPIC_DEFAULT_OPUS_MODEL, 'codex,gpt-6-astra');
+  assert.equal(
+    clientEnv.ANTHROPIC_MODEL,
+    undefined,
+    'the session model comes from --model'
+  );
+  assert.equal(clientEnv.CLAUDE_CODE_MAX_CONTEXT_TOKENS, undefined, 'unknown window');
+  const legacyEnv: NodeJS.ProcessEnv = {};
+  const legacyArgs = client.prepareClient({
+    session,
+    active: { model: 'gpt-5.2', reasoningEffort: 'none' },
+    clientArgs: [],
+    env: legacyEnv,
+    cwd: project,
+  });
+
+  assert(!legacyArgs.includes('--effort'));
+  assert.equal(legacyEnv.CLAUDE_CODE_EFFORT_LEVEL, 'unset');
+  console.log(
+    'PASS: session client gets Codex /model rows, merged --settings, wrapped statusLine, plugin commands and PATH shim.'
+  );
+  const modelSnapshot = client.snapshotUserModel(userSettings);
+
+  assert.deepEqual(modelSnapshot, { file: userSettings, hasModel: true, model: 'opus' });
+  assert.equal(client.restoreUserModel(modelSnapshot), undefined, 'unchanged file');
+  const saved = JSON.parse(fs.readFileSync(userSettings, 'utf8'));
+
+  fs.writeFileSync(userSettings, JSON.stringify({ ...saved, model: 'codex,gpt-6-luna' }));
+  fs.chmodSync(userSettings, 0o644);
+  assert.match(client.restoreUserModel(modelSnapshot) || '', /codex,gpt-6-luna/);
+  const restored = JSON.parse(fs.readFileSync(userSettings, 'utf8'));
+
+  assert.equal(restored.model, 'opus');
+  assert.equal(restored.theme, 'dark', 'other user settings survive');
+  assert.equal(fs.statSync(userSettings).mode & 0o777, 0o644);
+  fs.writeFileSync(userSettings, JSON.stringify({ ...saved, model: 'sonnet' }));
+  assert.equal(client.restoreUserModel(modelSnapshot), undefined, 'foreign change stays');
+  const noModel = path.join(fixture, 'no-model.json');
+
+  fs.writeFileSync(noModel, '{}');
+  const emptySnapshot = client.snapshotUserModel(noModel);
+
+  fs.writeFileSync(noModel, JSON.stringify({ model: 'codex,gpt-6-astra' }));
+  client.restoreUserModel(emptySnapshot);
+  assert.deepEqual(JSON.parse(fs.readFileSync(noModel, 'utf8')), {});
+  console.log(
+    'PASS: a Codex model saved by /model is restored in user settings on exit; foreign edits are kept.'
+  );
 } finally {
   fs.rmSync(fixture, { recursive: true, force: true });
 }

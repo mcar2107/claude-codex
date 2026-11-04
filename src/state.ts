@@ -3,7 +3,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import type { AuthFile, Settings, SettingsInput, SettingsOverrides } from './state.types';
+import type {
+  AuthFile,
+  ModelsCache,
+  Settings,
+  SettingsInput,
+  SettingsOverrides,
+} from './state.types';
 
 export const runtime = path.resolve(
   process.env.CLAUDE_CODEX_STATE_DIR || path.join(os.homedir(), '.claude-codex')
@@ -28,6 +34,23 @@ export const models = [
   'gpt-5.2',
 ];
 
+export const modelsCacheFile = path.join(runtime, 'models.json');
+
+/**
+ * Уровни effort по возрастанию: по этому порядку неподдерживаемый уровень понижается.
+ */
+const EFFORT_ORDER = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+const MODEL_ID = /^gpt-[a-z0-9][a-z0-9.-]*$/;
+
+/**
+ * Префикс провайдера в ID модели клиента: `codex,gpt-6.1-sol`.
+ */
+export const CLIENT_PREFIX = 'codex,';
+
+export const isModelId = (value: unknown): value is string => {
+  return typeof value === 'string' && MODEL_ID.test(value);
+};
+
 export const effortsFor = (model: string): string[] => {
   if (/^gpt-(6|5\.6)(?:[.-]|$)/.test(model))
     return ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -36,12 +59,29 @@ export const effortsFor = (model: string): string[] => {
   return ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'];
 };
 
+/**
+ * Уровень из запроса клиента, приведённый к модели: неподдерживаемый понижается до ближайшего
+ * поддерживаемого — так же Claude Code поступает со своими моделями. `undefined` — уровень
+ * неизвестен или ниже всех допустимых.
+ */
+export const fitEffort = (model: string, effort: unknown): string | undefined => {
+  const supported = effortsFor(model);
+  const rank = typeof effort === 'string' ? EFFORT_ORDER.indexOf(effort) : -1;
+
+  if (rank < 0) return undefined;
+
+  return EFFORT_ORDER.slice(0, rank + 1)
+    .reverse()
+    .find((level) => {
+      return supported.includes(level);
+    });
+};
+
 const validate = (value: SettingsInput): Settings => {
   const model = String(value.model || '').replace(/^codex,/, '');
   const { reasoningEffort } = value;
 
-  if (!/^gpt-[a-z0-9][a-z0-9.-]*$/.test(model))
-    throw new Error('Expected a GPT model ID, such as gpt-6.1-sol');
+  if (!isModelId(model)) throw new Error('Expected a GPT model ID, such as gpt-6.1-sol');
   if (typeof reasoningEffort !== 'string' || !effortsFor(model).includes(reasoningEffort))
     throw new Error(`${model}: supported effort levels: ${effortsFor(model).join(', ')}`);
 
@@ -89,6 +129,38 @@ export const activeSettings = (
     ...(env.CLAUDE_CODEX_EFFORT ? { reasoningEffort: env.CLAUDE_CODEX_EFFORT } : {}),
     ...overrides,
   });
+};
+
+/**
+ * Кэш discovery необязателен: битый или чужой файл значит «кэша нет», а не ошибку запуска.
+ */
+export const readModelsCache = (): ModelsCache => {
+  try {
+    const cache = JSON.parse(fs.readFileSync(modelsCacheFile, 'utf8'));
+    const discovered: unknown[] = Array.isArray(cache.models) ? cache.models : [];
+    const windows: [string, unknown][] =
+      typeof cache.contextWindows === 'object' && cache.contextWindows !== null
+        ? Object.entries(cache.contextWindows)
+        : [];
+
+    return {
+      refreshedAt: typeof cache.refreshedAt === 'string' ? cache.refreshedAt : '',
+      models: discovered.filter(isModelId),
+      contextWindows: windows.reduce<Record<string, number>>((result, [id, size]) => {
+        if (
+          isModelId(id) &&
+          typeof size === 'number' &&
+          Number.isInteger(size) &&
+          size > 0
+        )
+          result[id] = size;
+
+        return result;
+      }, {}),
+    };
+  } catch {
+    return { refreshedAt: '', models: [], contextWindows: {} };
+  }
 };
 
 export const requireAuth = (): AuthFile => {

@@ -19,7 +19,17 @@ const sleep = (ms: number) => {
   });
 };
 
-const selfCommand = (args: string[]) => {
+/**
+ * Снимок лимитов Codex в каталоге сессии: его пишет роутер, читает обёртка statusline.
+ */
+export const LIMITS_FILE = 'rate-limits.json';
+
+/**
+ * Последний запрос сессии к Codex — для проверки `/model` и `/effort` (`cat` во время сессии).
+ */
+const REQUEST_FILE = 'last-request.json';
+
+export const selfCommand = (args: string[]) => {
   const isStandalone = Bun.main.startsWith('/$bunfs/');
 
   return [process.execPath, ...(isStandalone ? [] : [process.argv[1]]), ...args];
@@ -67,7 +77,11 @@ export const internalRouter = async (session: string | undefined) => {
    * Ни учётные данные, ни локальный ключ сессии не печатаются и не попадают в метаданные.
    */
   const { createRouter } = await import('./transport/server');
-  const app = await createRouter({ key });
+  const app = await createRouter({
+    key,
+    limitsFile: path.join(session, LIMITS_FILE),
+    requestFile: path.join(session, REQUEST_FILE),
+  });
   const base = await app.listen({ host: '127.0.0.1', port: 0 });
   const metadata: RouterMetadata = {
     pid: process.pid,
@@ -241,6 +255,7 @@ export const withRouter = async <T>(
       return await action({
         base: metadata.base,
         key,
+        session,
         active,
         env,
         signal: controller.signal,

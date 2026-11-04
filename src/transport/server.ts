@@ -9,12 +9,51 @@ import { ProviderService } from '../../vendor/ccr/core/src/services/provider';
 import { TokenizerService } from '../../vendor/ccr/core/src/services/tokenizer';
 import { TransformerService } from '../../vendor/ccr/core/src/services/transformer';
 import type { UnifiedChatRequest } from '../../vendor/ccr/core/src/types/llm';
+import type { TransformerContext } from '../../vendor/ccr/core/src/types/transformer';
 import { calculateTokenCount } from '../../vendor/ccr/core/src/utils/router';
 import * as state from '../state';
 
+import { probeResponseModel } from './last-request';
+import type { LastRequest, ModelChoice } from './last-request.types';
+import { codexRateLimits } from './limits';
 import type { CountTokensRoute, CreateRouterOptions } from './server.types';
 
-export async function createRouter({ key }: CreateRouterOptions) {
+/**
+ * Маршруты, тело которых несёт модель клиента.
+ */
+const MODEL_ROUTES = ['/v1/messages', '/v1/messages/count_tokens'];
+
+/**
+ * Служебные файлы сессии — для statusline и проверки; сбой записи не должен ронять ответ модели.
+ */
+const writeQuietly = (file: string | undefined, data: unknown) => {
+  if (!file) return;
+
+  try {
+    state.writeJson(file, data);
+  } catch {
+    /**
+     * Файл диагностический: без него ответ модели всё равно корректен.
+     */
+  }
+};
+
+const stringOrNull = (value: unknown) => {
+  return typeof value === 'string' && value ? value : null;
+};
+
+export async function createRouter({
+  key,
+  limitsFile,
+  requestFile,
+}: CreateRouterOptions) {
+  /**
+   * Выбор клиента и итоговый запрос — по объекту запроса Fastify: их видят и хук, и трансформеры
+   * (`context.req`), а параллельные запросы сессии не путаются.
+   */
+  const clientChoices = new WeakMap<object, ModelChoice>();
+  const lastRequests = new WeakMap<object, LastRequest>();
+
   process.env.CCR_CODEX_AUTH_FILE = state.authFile;
   process.env.CCR_MODELSDEV_DISABLE = '1';
   const app = Fastify({ logger: false, bodyLimit: 50 * 1024 * 1024 });
@@ -44,6 +83,38 @@ export async function createRouter({ key }: CreateRouterOptions) {
     )
       return reply.code(404).send({ error: { message: 'Not found' } });
   });
+  /**
+   * Модель выбирает клиент (`/model`), но только среди моделей Codex: ID без префикса `codex,`
+   * (алиас Claude, модель фоновой задачи) уходит в модель из настроек, а не в маршрут CCR по
+   * умолчанию.
+   */
+  app.addHook('preHandler', async (request) => {
+    const { body } = request;
+
+    if (
+      !MODEL_ROUTES.includes(request.url.split('?')[0]) ||
+      typeof body !== 'object' ||
+      body === null
+    )
+      return;
+    const requested: unknown = Reflect.get(body, 'model');
+    const outputConfig: unknown = Reflect.get(body, 'output_config');
+
+    clientChoices.set(request, {
+      model: stringOrNull(requested),
+      effort:
+        typeof outputConfig === 'object' && outputConfig !== null
+          ? stringOrNull(Reflect.get(outputConfig, 'effort'))
+          : null,
+    });
+    const id =
+      typeof requested === 'string' && requested.startsWith(state.CLIENT_PREFIX)
+        ? requested.slice(state.CLIENT_PREFIX.length)
+        : undefined;
+
+    if (!state.isModelId(id))
+      Reflect.set(body, 'model', state.CLIENT_PREFIX + state.activeSettings().model);
+  });
   const route = 'codex,gpt-6.1-sol';
   const configService = new ConfigService({
     useJsonFile: false,
@@ -57,7 +128,14 @@ export async function createRouter({ key }: CreateRouterOptions) {
           api_base_url: 'https://chatgpt.com/backend-api/codex',
           api_key: 'oauth',
           models: [...state.models],
-          transformer: { use: ['local-codex-settings', 'openai-responses', 'codex'] },
+          transformer: {
+            use: [
+              'local-codex-settings',
+              'openai-responses',
+              'codex',
+              'local-codex-limits',
+            ],
+          },
         },
       ],
       Router: {
@@ -73,20 +151,84 @@ export async function createRouter({ key }: CreateRouterOptions) {
   const transformerService = new TransformerService(configService, app.log);
 
   await transformerService.initialize();
+  /**
+   * Модель и effort — из запроса клиента: `/model` и `/effort` Claude Code переключают их в
+   * открытой сессии. Настройки моста — запасной вариант, когда клиент уровня не прислал.
+   */
   transformerService.registerTransformer('local-codex-settings', {
     name: 'local-codex-settings',
-    async transformRequestIn(body: UnifiedChatRequest) {
+    async transformRequestIn(
+      body: UnifiedChatRequest,
+      _provider: unknown,
+      context?: TransformerContext
+    ) {
       const active = state.activeSettings();
+      const model = state.isModelId(body.model) ? body.model : active.model;
+      const reasoningEffort =
+        state.fitEffort(model, body.reasoning?.effort) ||
+        state.fitEffort(model, active.reasoningEffort) ||
+        state.effortsFor(model)[0];
+      const { req } = context || {};
+
+      if (requestFile && typeof req === 'object' && req !== null) {
+        const record: LastRequest = {
+          at: new Date().toISOString(),
+          client: clientChoices.get(req) || { model: null, effort: null },
+          upstream: { model, effort: reasoningEffort },
+        };
+
+        lastRequests.set(req, record);
+        writeQuietly(requestFile, record);
+      }
 
       return {
         ...body,
-        model: active.model,
+        model,
         reasoning: {
           ...body.reasoning,
-          effort: active.reasoningEffort,
-          enabled: active.reasoningEffort !== 'none',
+          effort: reasoningEffort,
+          enabled: reasoningEffort !== 'none',
         },
       };
+    },
+  });
+  /**
+   * Последний в цепочке запроса — значит, первый в цепочке ответа (`compileTransformerPlan`):
+   * видит заголовки ответа Codex до того, как ответ пересоберут в протокол клиента.
+   */
+  transformerService.registerTransformer('local-codex-limits', {
+    name: 'local-codex-limits',
+    requestPhase: 'headers',
+    async transformResponseOut(response: Response, context?: TransformerContext) {
+      const limits = codexRateLimits(response.headers);
+
+      if (limits) writeQuietly(limitsFile, limits);
+      const record =
+        typeof context?.req === 'object' && context.req !== null
+          ? lastRequests.get(context.req)
+          : undefined;
+
+      if (!record || !response.ok || !response.body) return response;
+      /**
+       * Модель ответа Codex — в первом событии стрима; клиент получает свою копию потока.
+       */
+      const [forClient, probe] = response.body.tee();
+
+      probeResponseModel(probe, context?.signal)
+        .then((returnedModel) => {
+          if (returnedModel) writeQuietly(requestFile, { ...record, returnedModel });
+        })
+        .catch(() => {
+          /**
+           * Зонд не бросает, но и сбой здесь касается только диагностического файла.
+           */
+        });
+
+      return new Response(forClient, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      });
     },
   });
   const providerService = new ProviderService(configService, transformerService, app.log);
