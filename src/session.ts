@@ -76,9 +76,7 @@ export const LIMITS_FILE = 'rate-limits.json';
 const REQUEST_FILE = 'last-request.json';
 
 export const selfCommand = (args: string[]) => {
-  const isStandalone = Bun.main.startsWith('/$bunfs/');
-
-  return [process.execPath, ...(isStandalone ? [] : [process.argv[1]]), ...args];
+  return [process.execPath, ...(state.isStandalone() ? [] : [process.argv[1]]), ...args];
 };
 
 export const parseOverrides = (args: string[]): ParsedOverrides => {

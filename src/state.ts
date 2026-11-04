@@ -41,6 +41,14 @@ export const MODELS = [
 export const MODELS_CACHE_FILE = path.join(RUNTIME_DIR, 'models.json');
 
 /**
+ * Standalone-бинарник: точка входа лежит во встроенной ФС Bun, а `process.execPath` — сам CLI, а не
+ * рантайм Bun.
+ */
+export const isStandalone = () => {
+  return Bun.main.startsWith('/$bunfs/');
+};
+
+/**
  * Уровни effort по возрастанию: по этому порядку неподдерживаемый уровень понижается.
  */
 const EFFORT_ORDER = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];

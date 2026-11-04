@@ -38,7 +38,7 @@ bun run lint:secrets      # секреты в истории git; lint:deps — 
 
 ```
 src/
-  cli.ts                  вход CLI: launch, auth, doctor, settings, models, setup
+  cli.ts                  вход CLI: launch, auth, doctor, settings, models, setup, update
   session.ts              сессия: свой роутер на порту с ключом, запуск клиента, завершение
   state.ts                state-каталог (~/.claude-codex, CLAUDE_CODEX_STATE_DIR), настройки, OAuth-файл
   auth.ts                 PKCE OAuth login, status
@@ -46,6 +46,7 @@ src/
   client.ts               подготовка клиента: модели в /model, --settings, плагин /codex:*, statusLine, model в ~/.claude
   statusline.ts           обёртка statusLine: rate_limits Codex в JSON statusline
   setup.ts                удаление глобальных /codex-* (setup --remove)
+  update.ts               самообновление standalone-бинарника из GitHub Releases (update)
   *.types.ts              типы модуля рядом с ним (typescript.md)
   transport/              адаптер к vendor/ccr: сервер Fastify, лимиты Codex (limits.ts), подмены модулей upstream (vendor.md)
 vendor/ccr/               исходники CCR upstream байт в байт — не править (vendor.md)

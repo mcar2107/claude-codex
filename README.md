@@ -356,10 +356,24 @@ success from mock tests or a model label alone.
 
 ## Upgrade and uninstall
 
-Re-run the installer (or set `CLAUDE_CODEX_VERSION`), rebuild from an updated
-checkout or replace the standalone executable. Settings and tokens stay in the
-external state directory. Review model/transport
-compatibility before upgrading.
+A release binary updates itself:
+
+```sh
+claude-codex update           # latest stable release
+claude-codex update v1.0.0    # a specific tag: a prerelease or a downgrade
+```
+
+`update` takes the asset for the running binary's OS and architecture,
+verifies it against the release `SHA256SUMS`, runs the new binary with
+`--version` and only then replaces the executable (symlinks are followed to
+the real file). Any failed check leaves the old binary in place. Running
+sessions keep the previous version until restarted. License notices are
+refreshed in `${CLAUDE_CODEX_SHARE_DIR:-${XDG_DATA_HOME:-~/.local/share}/claude-codex}`
+only if that directory already exists. The bundled CLI (`dist/cli.js`) does not
+update itself: rebuild it from an updated checkout. Re-running the installer
+(or setting `CLAUDE_CODEX_VERSION`) works too. Settings and tokens stay in the
+external state directory. Review model/transport compatibility before
+upgrading.
 
 ```sh
 claude-codex setup --remove   # only if an earlier version's setup was used
