@@ -136,6 +136,11 @@ const launch = (args: string[]) => {
 
     env.ANTHROPIC_BASE_URL = base;
     env.ANTHROPIC_AUTH_TOKEN = key;
+    /**
+     * Codex не возвращает серверные verdict для auto mode: клиент использует отдельные
+     * запросы классификатора без предупреждения о неподдерживаемых серверных проверках.
+     */
+    env.CLAUDE_CODE_AUTO_MODE_SERVER = '0';
     const { isClientModel, prepareClient, restoreUserModel, snapshotUserModel } =
       await import('./client');
     const snapshot = snapshotUserModel();
