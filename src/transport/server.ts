@@ -13,6 +13,7 @@ import type { TransformerContext } from '../../vendor/ccr/core/src/types/transfo
 import { calculateTokenCount } from '../../vendor/ccr/core/src/utils/router';
 import * as state from '../state';
 
+import { guardToolArguments } from './guard';
 import { probeResponseModel } from './last-request';
 import type { LastRequest, ModelChoice } from './last-request.types';
 import { codexRateLimits } from './limits';
@@ -65,6 +66,7 @@ export const createRouter = async ({
   key,
   limitsFile,
   requestFile,
+  guardFile,
 }: CreateRouterOptions) => {
   /**
    * Пустой ключ совпал бы с запросом без ключа: `timingSafeEqual` двух пустых буферов — `true`.
@@ -166,6 +168,7 @@ export const createRouter = async ({
               'local-codex-settings',
               'openai-responses',
               'codex',
+              'local-codex-guard',
               'local-codex-limits',
             ],
           },
@@ -273,6 +276,38 @@ export const createRouter = async ({
       void recordReturnedModel();
 
       return new Response(forClient, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      });
+    },
+  });
+  /**
+   * Сразу за `local-codex-limits` в цепочке ответа: видит сырой поток Codex до перевода в протокол
+   * клиента. Codex иногда зацикливается на пробелах внутри аргументов вызова инструмента — без
+   * сторожа клиент ждал бы такой ответ бесконечно.
+   */
+  transformerService.registerTransformer('local-codex-guard', {
+    name: 'local-codex-guard',
+    requestPhase: 'headers',
+    async transformResponseOut(response: Response) {
+      const contentType = response.headers.get('Content-Type') || '';
+
+      if (
+        !response.ok ||
+        !response.body ||
+        (contentType && !contentType.includes('text/event-stream'))
+      ) {
+        return response;
+      }
+
+      const body = guardToolArguments(response.body, {
+        onTrip: (trip) => {
+          writeQuietly(guardFile, trip);
+        },
+      });
+
+      return new Response(body, {
         status: response.status,
         statusText: response.statusText,
         headers: response.headers,

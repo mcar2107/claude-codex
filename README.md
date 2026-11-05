@@ -200,7 +200,7 @@ are `0600`, directories `0700`.
 | `codex_auth.json` | OAuth credentials; refresh is atomic and locked across processes |
 | `settings.json` | saved model and effort |
 | `models.json` | discovery cache |
-| `session-*` | per-session router metadata, Claude settings, plugin, status line data, last request (models and effort only, no prompts) |
+| `session-*` | per-session router metadata, Claude settings, plugin, status line data, last request (models and effort only, no prompts), last tool argument guard trip (`tool-guard.json`) |
 
 - Each session gets its own router, random loopback port and random API key; the
   key is never written to disk. Only health, models, messages and token count
@@ -247,6 +247,11 @@ token on the service side.
   value, because Codex returns no server verdicts. The client runs its own
   classifier requests instead
   ([classifier billing](https://code.claude.com/docs/en/auto-mode-classifier-billing)).
+- Codex sometimes loops on whitespace inside tool call arguments and never
+  finishes the response. The router stops such a stream after 256 whitespace
+  characters in a row outside JSON strings: if the arguments close with
+  brackets, Claude Code gets a finished tool call; otherwise it gets an error
+  and the request can be retried. Repetition of other text is not detected.
 - Binaries are not signed or notarized.
 - Token counting is exact but synchronous; very large requests can briefly
   block the router.

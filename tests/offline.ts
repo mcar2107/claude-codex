@@ -10,6 +10,7 @@ import type {
   CancellationProbe,
   CapturedRequest,
   FetchImpl,
+  MockStream,
   ResponseOutputItem,
 } from './offline.types';
 
@@ -224,6 +225,7 @@ try {
   let output: ResponseOutputItem[] | undefined;
   let upstreamError: number | undefined;
   let cancellationProbe: CancellationProbe | undefined;
+  let mockStream: MockStream | undefined;
   let limitHeaders: Record<string, string> = {};
 
   mockFetch(async (url, opts) => {
@@ -234,6 +236,26 @@ try {
     const upstreamRequest: CapturedRequest = JSON.parse(String(opts?.body));
 
     captured = upstreamRequest;
+
+    if (mockStream) {
+      const { frames, isClosed, probe } = mockStream;
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const frame of frames) {
+            controller.enqueue(new TextEncoder().encode(frame));
+          }
+
+          if (isClosed) {
+            controller.close();
+          }
+        },
+        cancel() {
+          probe.isCancelled = true;
+        },
+      });
+
+      return new Response(stream, { headers: { 'Content-Type': 'text/event-stream' } });
+    }
 
     if (upstreamError) {
       return new Response(
@@ -574,6 +596,169 @@ try {
     );
     console.log(
       'PASS: disconnecting a real loopback SSE client cancels the mocked upstream stream.'
+    );
+
+    const { createScan, repairArguments, scanArguments, WHITESPACE_RUN_LIMIT } =
+      await import('../src/transport/guard');
+    const nested = createScan();
+    const nestedArgs = '{"a":[1,{"b":"x\\" ] }"' + ' '.repeat(10);
+
+    assert.equal(scanArguments(nested, nestedArgs, 4), true, 'whitespace after a value');
+    assert.deepEqual(repairArguments(nestedArgs, nested), {
+      closing: '}]}',
+      input: { a: [1, { b: 'x" ] }' }] },
+    });
+    const quoted = createScan();
+    const quotedArgs = '{"a":"\\\\' + ' '.repeat(10);
+
+    assert.equal(scanArguments(quoted, quotedArgs, 4), false, 'spaces inside a string');
+    assert.equal(repairArguments(quotedArgs, quoted), undefined, 'loop inside a string');
+    const guardFile = path.join(fixture, 'session-test', 'tool-guard.json');
+    const guardApp = await createRouter({ key: 'test-key', guardFile });
+
+    /**
+     * Ответ Codex с вызовом `read_file`: аргументы — данными дельтами; `isClosed` — поток
+     * завершается как обычно, иначе висит, как Codex в петле. Поток режется на куски по 5 символов:
+     * строки событий у настоящего Codex тоже приходят по частям.
+     */
+    const toolStream = (deltas: string[], isClosed: boolean): MockStream => {
+      const item = {
+        id: 'fc_loop',
+        type: 'function_call',
+        status: 'in_progress',
+        call_id: 'call_loop',
+        name: 'read_file',
+        arguments: '',
+      };
+      const done = { ...item, status: 'completed', arguments: deltas.join('') };
+      const response = {
+        id: 'resp_loop',
+        object: 'response',
+        status: 'in_progress',
+        model: 'gpt-6.1-sol',
+        output: [],
+      };
+
+      const frames = [
+        sse('response.created', { response }),
+        sse('response.output_item.added', { output_index: 0, item }),
+        ...deltas.map((delta) => {
+          return sse('response.function_call_arguments.delta', {
+            item_id: item.id,
+            output_index: 0,
+            delta,
+          });
+        }),
+        ...(isClosed
+          ? [
+              sse('response.output_item.done', { output_index: 0, item: done }),
+              sse('response.completed', {
+                response: { ...response, status: 'completed', output: [done] },
+              }),
+            ]
+          : []),
+      ];
+
+      return {
+        frames: frames.join('').match(/[\s\S]{1,5}/g) || [],
+        isClosed,
+        probe: { isAborted: false, isCancelled: false },
+      };
+    };
+
+    /**
+     * Без сторожа поток в петле не закрывается никогда: тест должен упасть, а не повиснуть.
+     */
+    const postStream = async () => {
+      const stalled = new Promise<never>((_resolve, reject) => {
+        setTimeout(() => {
+          reject(new Error('guard did not close the looping stream'));
+        }, 5000).unref();
+      });
+      const result = await Promise.race([
+        guardApp.inject({
+          method: 'POST',
+          url: '/v1/messages',
+          headers,
+          payload: { ...request, stream: true },
+        }),
+        stalled,
+      ]);
+
+      assert.equal(result.statusCode, 200, result.body.slice(0, 1000));
+
+      return result.body;
+    };
+
+    const toolInput = (body: string) => {
+      const json = body.split('\n').reduce((text, line) => {
+        if (!line.startsWith('data: ')) {
+          return text;
+        }
+
+        const event = JSON.parse(line.slice(6));
+        const isInputDelta =
+          event.type === 'content_block_delta' && event.delta.type === 'input_json_delta';
+
+        return isInputDelta ? text + event.delta.partial_json : text;
+      }, '');
+
+      return JSON.parse(json);
+    };
+
+    const loop = Array.from({ length: WHITESPACE_RUN_LIMIT }, () => {
+      return ' \n';
+    });
+
+    try {
+      /**
+       * Длинные пробелы внутри строкового значения — не петля.
+       */
+      const spaced = `x${' '.repeat(WHITESPACE_RUN_LIMIT * 2)}y`;
+
+      mockStream = toolStream([`{"path":"${spaced}"}`], true);
+      const benign = await postStream();
+
+      assert.deepEqual(toolInput(benign), { path: spaced });
+      assert(!fs.existsSync(guardFile), 'no trip on whitespace inside a string');
+
+      /**
+       * Петля после закрытого значения: вызов закрывается, upstream отменяется.
+       */
+      const repairedStream = toolStream(['{"path":"a.txt"', ...loop], false);
+
+      mockStream = repairedStream;
+      const repaired = await postStream();
+
+      assert.deepEqual(toolInput(repaired), { path: 'a.txt' });
+      assert.match(repaired, /"stop_reason":"tool_use"/);
+      assert(repaired.includes('message_stop'), repaired.slice(-500));
+      assert(repairedStream.probe.isCancelled, 'repair cancels the looping upstream');
+      const repairedTrip = JSON.parse(fs.readFileSync(guardFile, 'utf8'));
+
+      assert.equal(repairedTrip.tool, 'read_file');
+      assert.equal(repairedTrip.isRepaired, true);
+      assert(repairedTrip.whitespace > WHITESPACE_RUN_LIMIT);
+
+      /**
+       * Петля после ключа: закрыть нечем — поток обрывается ошибкой.
+       */
+      const brokenStream = toolStream(['{"path":', ...loop], false);
+
+      mockStream = brokenStream;
+      const broken = await postStream();
+
+      assert.match(broken, /event: error/);
+      assert.match(broken, /looped on whitespace in read_file arguments/);
+      assert(brokenStream.probe.isCancelled, 'error cancels the looping upstream');
+      assert.equal(JSON.parse(fs.readFileSync(guardFile, 'utf8')).isRepaired, false);
+    } finally {
+      mockStream = undefined;
+      await guardApp.close();
+    }
+
+    console.log(
+      'PASS: tool argument guard ignores whitespace inside strings, closes a whitespace loop after a value as a finished tool call, fails one after a key, cancels upstream and records the trip.'
     );
   } finally {
     globalThis.fetch = originalFetch;

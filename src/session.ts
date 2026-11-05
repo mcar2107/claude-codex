@@ -75,6 +75,11 @@ export const LIMITS_FILE = 'rate-limits.json';
  */
 const REQUEST_FILE = 'last-request.json';
 
+/**
+ * Последнее срабатывание сторожа петли пробелов в аргументах инструмента (`src/transport/guard.ts`).
+ */
+const GUARD_FILE = 'tool-guard.json';
+
 export const selfCommand = (args: string[]) => {
   return [process.execPath, ...(state.isStandalone() ? [] : [process.argv[1]]), ...args];
 };
@@ -137,6 +142,7 @@ export const internalRouter = async (session: string | undefined) => {
     key,
     limitsFile: path.join(session, LIMITS_FILE),
     requestFile: path.join(session, REQUEST_FILE),
+    guardFile: path.join(session, GUARD_FILE),
   });
   const base = await app.listen({ host: '127.0.0.1', port: 0 });
   const metadata: RouterMetadata = {
