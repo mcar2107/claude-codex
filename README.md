@@ -249,9 +249,10 @@ token on the service side.
   ([classifier billing](https://code.claude.com/docs/en/auto-mode-classifier-billing)).
 - Codex sometimes loops on whitespace inside tool call arguments and never
   finishes the response. The router stops such a stream after 256 whitespace
-  characters in a row outside JSON strings: if the arguments close with
-  brackets, Claude Code gets a finished tool call; otherwise it gets an error
-  and the request can be retried. Repetition of other text is not detected.
+  characters in a row outside JSON strings: if the arguments were already
+  complete, Claude Code gets a finished tool call; if the loop started inside
+  the arguments or another tool call is unfinished, it gets an error and the
+  request can be retried. Repetition of other text is not detected.
 - Binaries are not signed or notarized.
 - Token counting is exact but synchronous; very large requests can briefly
   block the router.
