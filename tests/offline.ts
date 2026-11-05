@@ -605,6 +605,7 @@ try {
 
     const {
       createScan,
+      FILE_CONTENT_REPEAT_FACTOR,
       repairArguments,
       REPEAT_RUN_LIMIT,
       scanArguments,
@@ -618,7 +619,7 @@ try {
       'whitespace',
       'whitespace after a value'
     );
-    assert.equal(nested.depth, 3);
+    assert.equal(nested.containers.length, 3);
     assert.equal(
       repairArguments(nestedArgs, nested),
       undefined,
@@ -644,8 +645,9 @@ try {
     assert.equal(repairArguments(quotedArgs, quoted), undefined, 'loop inside a string');
 
     /**
-     * Повтор внутри строки: петля — короткий кусок с буквой на `REPEAT_RUN_LIMIT` символов в поле,
-     * которое не несёт содержимое файла. Порция приходит по символу, как дельты Codex.
+     * Повтор внутри строки: петля — короткий кусок с буквой на `REPEAT_RUN_LIMIT` символов, в полях
+     * с содержимым файла — в `FILE_CONTENT_REPEAT_FACTOR` раз длиннее. Порция приходит по символу,
+     * как дельты Codex.
      */
     const repeatOf = (args: string) => {
       const scan = createScan();
@@ -677,6 +679,51 @@ try {
       undefined,
       'nested file content may repeat'
     );
+    assert.equal(
+      repeatOf(
+        `{"file_path":"a","content":"${'xy'.repeat(REPEAT_RUN_LIMIT * FILE_CONTENT_REPEAT_FACTOR)}`
+      ),
+      'repeat',
+      'a looping file content'
+    );
+    /**
+     * Escape-последовательности раскодируются: `\n` и `\u2500` — не буквы.
+     */
+    assert.equal(
+      repeatOf(
+        JSON.stringify({ command: 'cat <<EOF\n' + '0,0,0\n'.repeat(300) }).slice(0, -2)
+      ),
+      undefined,
+      'escaped newlines between numbers are data'
+    );
+    assert.equal(
+      repeatOf(
+        JSON.stringify({ command: '\n'.repeat(REPEAT_RUN_LIMIT * 2) }).slice(0, -2)
+      ),
+      undefined,
+      'escaped empty lines are data'
+    );
+    assert.equal(
+      repeatOf(`{"command":"echo ${'\\u2500'.repeat(REPEAT_RUN_LIMIT * 2)}`),
+      undefined,
+      'escaped box drawing is data'
+    );
+    assert.equal(
+      repeatOf(`{"description":"${'\\u0441\\u0442'.repeat(REPEAT_RUN_LIMIT)}`),
+      'repeat',
+      'escaped letters still loop'
+    );
+    /**
+     * Порция, на которой повтор прошёл порог, закрыла объект: аргументы дописаны и чинятся.
+     */
+    const closed = createScan();
+    const closedHead = `{"description":"${'ab'.repeat(REPEAT_RUN_LIMIT / 2)}`;
+
+    assert.equal(scanArguments(closed, closedHead, WHITESPACE_RUN_LIMIT), undefined);
+    assert.equal(scanArguments(closed, 'ab"}', WHITESPACE_RUN_LIMIT), 'repeat');
+    assert.deepEqual(repairArguments(`${closedHead}ab"}`, closed), {
+      description: 'ab'.repeat(REPEAT_RUN_LIMIT / 2 + 1),
+    });
     assert.equal(
       repeatOf(`{"command":"echo ${'-'.repeat(REPEAT_RUN_LIMIT * 2)}`),
       undefined,
