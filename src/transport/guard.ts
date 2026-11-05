@@ -30,10 +30,14 @@ const REPEAT_UNIT_LIMIT = 40;
 export const REPEAT_RUN_LIMIT = 1000;
 
 /**
- * Поля с содержимым файлов: повторяющийся текст в них бывает настоящим, и обрыв записи файла
- * хуже долгого ответа.
+ * Поля с содержимым файлов: повторяющийся текст в них бывает настоящим, и ложный обрыв записи
+ * файла хуже долгого ответа. Поэтому порог повтора в них выше в `FILE_CONTENT_REPEAT_FACTOR` раз:
+ * настоящий файл редко повторяет кусок до `REPEAT_UNIT_LIMIT` символов на десятки тысяч символов
+ * подряд, а без порога петля в `Write` или `Edit` висела бы бесконечно.
  */
 const FILE_CONTENT_KEYS = new Set(['content', 'new_string', 'old_string', 'new_source']);
+
+export const FILE_CONTENT_REPEAT_FACTOR = 20;
 
 const LOOP_ERRORS: Record<LoopKind, LoopError> = {
   whitespace: { code: 'tool_arguments_whitespace_loop', text: 'whitespace' },
@@ -47,17 +51,30 @@ const WHITESPACE = new Set([' ', '\n', '\r', '\t']);
  */
 const LETTER = /\p{L}/u;
 
+/**
+ * Символы, которые означают однобуквенные escape-последовательности JSON: в поиск повтора идёт
+ * сам символ, а не буква после `\` — иначе повтор строк из цифр и разделителей (`0,0,0\n…`)
+ * нашёл бы букву `n`.
+ */
+const ESCAPES: Record<string, string> = {
+  b: '\b',
+  f: '\f',
+  n: '\n',
+  r: '\r',
+  t: '\t',
+};
+
 export const createScan = (): ArgumentsScan => {
   return {
     isInString: false,
     isEscaped: false,
-    depth: 0,
+    unicodeHex: undefined,
     containers: '',
     isKeyNext: false,
     isKey: false,
     key: '',
     keyText: '',
-    shouldCheckRepeat: false,
+    isFileContent: false,
     recent: [],
     periodRuns: [],
     whitespaceRun: 0,
@@ -70,13 +87,19 @@ export const createScan = (): ArgumentsScan => {
  */
 const scanRepeat = (scan: ArgumentsScan, char: string, limit: number) => {
   const { recent, periodRuns } = scan;
-  let hasLoop = false;
+  /**
+   * Букву ищем только в наименьшем периоде, прошедшем порог: порог много больше двух
+   * `REPEAT_UNIT_LIMIT`, поэтому остальные такие периоды кратны ему (теорема Файна — Вильфа) и
+   * состоят из тех же символов. Иначе повтор без букв (`-----`) проверялся бы на каждом из
+   * `REPEAT_UNIT_LIMIT` периодов для каждого символа.
+   */
+  let hasLoop: boolean | undefined;
 
   for (let period = 1; period <= recent.length; period += 1) {
     periodRuns[period] =
       recent[recent.length - period] === char ? (periodRuns[period] || 0) + 1 : 0;
 
-    if (!hasLoop && periodRuns[period] >= limit) {
+    if (hasLoop === undefined && periodRuns[period] >= limit) {
       hasLoop = LETTER.test(recent.slice(recent.length - period + 1).join('') + char);
     }
   }
@@ -87,22 +110,67 @@ const scanRepeat = (scan: ArgumentsScan, char: string, limit: number) => {
     recent.shift();
   }
 
-  return hasLoop;
+  return Boolean(hasLoop);
+};
+
+/**
+ * Раскодированный символ строки: текст ключа или символ значения для поиска повтора.
+ */
+const scanDecodedChar = (scan: ArgumentsScan, char: string, repeatLimit: number) => {
+  if (scan.isKey) {
+    scan.keyText += char;
+
+    return false;
+  }
+
+  return scanRepeat(
+    scan,
+    char,
+    scan.isFileContent ? repeatLimit * FILE_CONTENT_REPEAT_FACTOR : repeatLimit
+  );
 };
 
 /**
  * Символ внутри строки — ключа или значения.
  */
 const scanStringChar = (scan: ArgumentsScan, char: string, repeatLimit: number) => {
-  const isClosing = !scan.isEscaped && char === '"';
+  if (scan.unicodeHex !== undefined) {
+    scan.unicodeHex += char;
+
+    if (scan.unicodeHex.length < 4) {
+      return false;
+    }
+
+    /**
+     * `\u2500` и подобные — один символ: иначе буква `u` сделала бы повтор псевдографики
+     * петлёй.
+     */
+    const decoded = String.fromCharCode(Number.parseInt(scan.unicodeHex, 16));
+
+    scan.unicodeHex = undefined;
+
+    return scanDecodedChar(scan, decoded, repeatLimit);
+  }
 
   if (scan.isEscaped) {
     scan.isEscaped = false;
-  } else if (char === '\\') {
-    scan.isEscaped = true;
+
+    if (char === 'u') {
+      scan.unicodeHex = '';
+
+      return false;
+    }
+
+    return scanDecodedChar(scan, ESCAPES[char] || char, repeatLimit);
   }
 
-  if (isClosing) {
+  if (char === '\\') {
+    scan.isEscaped = true;
+
+    return false;
+  }
+
+  if (char === '"') {
     scan.isInString = false;
 
     if (scan.isKey) {
@@ -112,13 +180,7 @@ const scanStringChar = (scan: ArgumentsScan, char: string, repeatLimit: number) 
     return false;
   }
 
-  if (scan.isKey) {
-    scan.keyText += char;
-
-    return false;
-  }
-
-  return scan.shouldCheckRepeat && scanRepeat(scan, char, repeatLimit);
+  return scanDecodedChar(scan, char, repeatLimit);
 };
 
 /**
@@ -135,7 +197,7 @@ const startString = (scan: ArgumentsScan) => {
     return;
   }
 
-  scan.shouldCheckRepeat = !FILE_CONTENT_KEYS.has(scan.key);
+  scan.isFileContent = FILE_CONTENT_KEYS.has(scan.key);
   scan.recent = [];
   scan.periodRuns = [];
 };
@@ -206,8 +268,6 @@ export const scanArguments = (
         break;
       }
     }
-
-    scan.depth = scan.containers.length;
   }
 
   return loop;
@@ -220,7 +280,7 @@ export const scanArguments = (
  * которые модель не успела дописать, и инструмент выполнился бы не с теми аргументами.
  */
 export const repairArguments = (args: string, scan: ArgumentsScan) => {
-  if (scan.isInString || scan.depth > 0) {
+  if (scan.isInString || scan.containers) {
     return undefined;
   }
 
@@ -242,8 +302,9 @@ export const sse = (type: string, data: object) => {
 /**
  * Оборачивает SSE-поток Responses API от Codex: при петле в аргументах вызова инструмента — пробелах
  * вне строк или повторе текста внутри строки — закрывает поток сам и отменяет upstream, чтобы клиент
- * не ждал бесконечно, а токены не тратились. Петля повтора всегда внутри строки, такие аргументы не
- * дописаны и завершаются ошибкой.
+ * не ждал бесконечно, а токены не тратились. Петля повтора обычно обрывает аргументы внутри строки —
+ * такой ответ завершается ошибкой. Если порция, на которой повтор прошёл порог, заодно закрыла
+ * объект, вызов отдаётся завершённым: те же аргументы клиент получил бы и без сторожа.
  *
  * Дописанные целиком аргументы отдаются клиенту завершённым вызовом (`response.completed`,
  * клиент выполняет инструмент), если других незавершённых вызовов нет; иначе ответ завершается
@@ -286,7 +347,7 @@ export const guardToolArguments = (
       tool,
       kind,
       whitespace: call.scan.whitespaceRun,
-      depth: call.scan.depth,
+      depth: call.scan.containers.length,
       isRepaired: Boolean(input),
     });
 

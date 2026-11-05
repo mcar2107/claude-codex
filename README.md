@@ -257,7 +257,8 @@ token on the service side.
   (for example in a `Bash` description). The router fails such a response once
   a piece of up to 40 characters containing a letter repeats for 1000
   characters in a row. File content fields (`content`, `new_string`,
-  `old_string`, `new_source`) are not checked, so a loop there still hangs.
+  `old_string`, `new_source`) use a 20 times higher threshold (20000
+  characters), so a loop there is stopped only after a few minutes.
 - Binaries are not signed or notarized.
 - Token counting is exact but synchronous; very large requests can briefly
   block the router.
