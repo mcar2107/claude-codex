@@ -252,7 +252,12 @@ token on the service side.
   characters in a row outside JSON strings: if the arguments were already
   complete, Claude Code gets a finished tool call; if the loop started inside
   the arguments or another tool call is unfinished, it gets an error and the
-  request can be retried. Repetition of other text is not detected.
+  request can be retried.
+- Codex also loops by repeating a short piece of text inside a string argument
+  (for example in a `Bash` description). The router fails such a response once
+  a piece of up to 40 characters containing a letter repeats for 1000
+  characters in a row. File content fields (`content`, `new_string`,
+  `old_string`, `new_source`) are not checked, so a loop there still hangs.
 - Binaries are not signed or notarized.
 - Token counting is exact but synchronous; very large requests can briefly
   block the router.

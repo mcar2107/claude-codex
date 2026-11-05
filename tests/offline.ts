@@ -603,12 +603,21 @@ try {
       'PASS: disconnecting a real loopback SSE client cancels the mocked upstream stream.'
     );
 
-    const { createScan, repairArguments, scanArguments, WHITESPACE_RUN_LIMIT } =
-      await import('../src/transport/guard');
+    const {
+      createScan,
+      repairArguments,
+      REPEAT_RUN_LIMIT,
+      scanArguments,
+      WHITESPACE_RUN_LIMIT,
+    } = await import('../src/transport/guard');
     const nested = createScan();
     const nestedArgs = '{"a":[1,{"b":"x\\" ] }"' + ' '.repeat(10);
 
-    assert.equal(scanArguments(nested, nestedArgs, 4), true, 'whitespace after a value');
+    assert.equal(
+      scanArguments(nested, nestedArgs, 4),
+      'whitespace',
+      'whitespace after a value'
+    );
     assert.equal(nested.depth, 3);
     assert.equal(
       repairArguments(nestedArgs, nested),
@@ -620,15 +629,65 @@ try {
 
     assert.equal(
       scanArguments(finished, finishedArgs, 4),
-      true,
+      'whitespace',
       'whitespace after the object'
     );
     assert.deepEqual(repairArguments(finishedArgs, finished), { a: [1, { b: ']' }] });
     const quoted = createScan();
     const quotedArgs = '{"a":"\\\\' + ' '.repeat(10);
 
-    assert.equal(scanArguments(quoted, quotedArgs, 4), false, 'spaces inside a string');
+    assert.equal(
+      scanArguments(quoted, quotedArgs, 4),
+      undefined,
+      'spaces inside a string'
+    );
     assert.equal(repairArguments(quotedArgs, quoted), undefined, 'loop inside a string');
+
+    /**
+     * Повтор внутри строки: петля — короткий кусок с буквой на `REPEAT_RUN_LIMIT` символов в поле,
+     * которое не несёт содержимое файла. Порция приходит по символу, как дельты Codex.
+     */
+    const repeatOf = (args: string) => {
+      const scan = createScan();
+
+      return [...args].reduce<string | undefined>((loop, char) => {
+        return loop || scanArguments(scan, char, WHITESPACE_RUN_LIMIT);
+      }, undefined);
+    };
+
+    const syllables = 'cтати'.repeat(REPEAT_RUN_LIMIT / 4);
+
+    assert.equal(
+      repeatOf(`{"command":"pwd","description":"Check ${syllables}`),
+      'repeat',
+      'a looping description'
+    );
+    assert.equal(
+      repeatOf(`{"content":"x","description":"${'xy'.repeat(REPEAT_RUN_LIMIT)}`),
+      'repeat',
+      'a looping value after file content'
+    );
+    assert.equal(
+      repeatOf(`{"file_path":"a","content":"${syllables}`),
+      undefined,
+      'file content may repeat'
+    );
+    assert.equal(
+      repeatOf(`{"edits":[{"old_string":"a","new_string":"${syllables}`),
+      undefined,
+      'nested file content may repeat'
+    );
+    assert.equal(
+      repeatOf(`{"command":"echo ${'-'.repeat(REPEAT_RUN_LIMIT * 2)}`),
+      undefined,
+      'separators without letters are data'
+    );
+    assert.equal(repeatOf(`{"${syllables}":1}`), undefined, 'keys are not checked');
+    assert.equal(
+      repeatOf(`{"command":"${'x'.repeat(REPEAT_RUN_LIMIT - 1)}"`),
+      undefined,
+      'below the limit'
+    );
     const guardFile = path.join(fixture, 'session-test', 'tool-guard.json');
     /**
      * Файлы — как у роутера сессии (`session.ts`): с `requestFile` лимиты отдают сторожу копию
@@ -806,6 +865,7 @@ try {
       const repairedTrip = readTrip();
 
       assert.equal(repairedTrip.tool, 'read_file');
+      assert.equal(repairedTrip.kind, 'whitespace');
       assert.equal(repairedTrip.isRepaired, true);
       assert.equal(repairedTrip.depth, 0);
       assert(repairedTrip.whitespace > WHITESPACE_RUN_LIMIT);
@@ -900,13 +960,35 @@ try {
       assert(parallelStream.probe.isCancelled, 'parallel error cancels the upstream');
       assert.equal(readTrip().isRepaired, false);
       assert.equal(readTrip().depth, 0);
+
+      /**
+       * Повтор текста в описании: аргументы не дописаны — ошибка, upstream отменяется.
+       */
+      const repeatStream = toolStream([
+        callAdded(0),
+        ...callDeltas(0, [
+          '{"path":"a.txt","description":"Check ',
+          ...Array.from({ length: REPEAT_RUN_LIMIT / 4 }, () => {
+            return 'cтати';
+          }),
+        ]),
+      ]);
+
+      mockStream = repeatStream;
+      const repeated = await postStream();
+
+      assert.match(repeated, /looped on repeated text in read_file arguments/);
+      assert.doesNotMatch(repeated, /"stop_reason":"tool_use"/);
+      assert(repeatStream.probe.isCancelled, 'repeat error cancels the upstream');
+      assert.equal(readTrip().kind, 'repeat');
+      assert.equal(readTrip().isRepaired, false);
     } finally {
       mockStream = undefined;
       await guardApp.close();
     }
 
     console.log(
-      'PASS: tool argument guard (router wired as in a session) ignores whitespace inside strings, finishes a call looping after complete arguments (also after an earlier call, streamed and collected), fails a loop inside the arguments (streamed and non-stream) or beside an unfinished parallel call, cancels upstream and records the trip.'
+      'PASS: tool argument guard (router wired as in a session) ignores whitespace inside strings, finishes a call looping after complete arguments (also after an earlier call, streamed and collected), fails a loop inside the arguments (streamed and non-stream) or beside an unfinished parallel call, fails repeated text inside a string except file content, cancels upstream and records the trip.'
     );
   } finally {
     globalThis.fetch = originalFetch;

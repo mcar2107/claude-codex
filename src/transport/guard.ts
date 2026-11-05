@@ -1,6 +1,12 @@
 import { isRecord } from '../state';
 
-import type { ArgumentsScan, GuardToolArgumentsOptions, ToolCall } from './guard.types';
+import type {
+  ArgumentsScan,
+  GuardToolArgumentsOptions,
+  LoopError,
+  LoopKind,
+  ToolCall,
+} from './guard.types';
 
 /**
  * Сколько пробельных символов подряд вне строк JSON считается петлёй. Между токенами отступы
@@ -11,32 +17,146 @@ import type { ArgumentsScan, GuardToolArgumentsOptions, ToolCall } from './guard
 export const WHITESPACE_RUN_LIMIT = 256;
 
 /**
- * Код ошибки, которой обрывается поток, если аргументы закрыть нельзя.
+ * Самый длинный кусок текста, повтор которого внутри строки ищется. Петли Codex — короткие слоги
+ * (`cтатиcтати…`); длиннее — уже повтор строк или блоков, который бывает в настоящих данных.
  */
-const LOOP_ERROR_CODE = 'tool_arguments_whitespace_loop';
+const REPEAT_UNIT_LIMIT = 40;
+
+/**
+ * Сколько символов подряд должен занять повтор, чтобы считаться петлёй. Петля пишется десятками
+ * символов в секунду — порог срабатывает примерно через 10–15 секунд, а осмысленный текст
+ * короткого куска на тысячу символов почти не повторяет.
+ */
+export const REPEAT_RUN_LIMIT = 1000;
+
+/**
+ * Поля с содержимым файлов: повторяющийся текст в них бывает настоящим, и обрыв записи файла
+ * хуже долгого ответа.
+ */
+const FILE_CONTENT_KEYS = new Set(['content', 'new_string', 'old_string', 'new_source']);
+
+const LOOP_ERRORS: Record<LoopKind, LoopError> = {
+  whitespace: { code: 'tool_arguments_whitespace_loop', text: 'whitespace' },
+  repeat: { code: 'tool_arguments_repeat_loop', text: 'repeated text' },
+};
 
 const WHITESPACE = new Set([' ', '\n', '\r', '\t']);
 
+/**
+ * Буква в повторяющемся куске: повторы разделителей и чисел (`-----`, `0,0,0`) — обычные данные.
+ */
+const LETTER = /\p{L}/u;
+
 export const createScan = (): ArgumentsScan => {
-  return { isInString: false, isEscaped: false, depth: 0, whitespaceRun: 0 };
+  return {
+    isInString: false,
+    isEscaped: false,
+    depth: 0,
+    containers: '',
+    isKeyNext: false,
+    isKey: false,
+    key: '',
+    keyText: '',
+    shouldCheckRepeat: false,
+    recent: [],
+    periodRuns: [],
+    whitespaceRun: 0,
+  };
 };
 
 /**
- * Продвигает лексер по очередной порции аргументов. `true` — серия пробелов вне строк превысила
- * порог хотя бы раз внутри порции: проверка только в конце пропустила бы серию, за которой в той же
+ * Продвигает поиск повтора на символ строкового значения. `true` — последние `limit` символов
+ * повторяют кусок до `REPEAT_UNIT_LIMIT` символов, в котором есть буква.
+ */
+const scanRepeat = (scan: ArgumentsScan, char: string, limit: number) => {
+  const { recent, periodRuns } = scan;
+  let hasLoop = false;
+
+  for (let period = 1; period <= recent.length; period += 1) {
+    periodRuns[period] =
+      recent[recent.length - period] === char ? (periodRuns[period] || 0) + 1 : 0;
+
+    if (!hasLoop && periodRuns[period] >= limit) {
+      hasLoop = LETTER.test(recent.slice(recent.length - period + 1).join('') + char);
+    }
+  }
+
+  recent.push(char);
+
+  if (recent.length > REPEAT_UNIT_LIMIT) {
+    recent.shift();
+  }
+
+  return hasLoop;
+};
+
+/**
+ * Символ внутри строки — ключа или значения.
+ */
+const scanStringChar = (scan: ArgumentsScan, char: string, repeatLimit: number) => {
+  const isClosing = !scan.isEscaped && char === '"';
+
+  if (scan.isEscaped) {
+    scan.isEscaped = false;
+  } else if (char === '\\') {
+    scan.isEscaped = true;
+  }
+
+  if (isClosing) {
+    scan.isInString = false;
+
+    if (scan.isKey) {
+      scan.key = scan.keyText;
+    }
+
+    return false;
+  }
+
+  if (scan.isKey) {
+    scan.keyText += char;
+
+    return false;
+  }
+
+  return scan.shouldCheckRepeat && scanRepeat(scan, char, repeatLimit);
+};
+
+/**
+ * Начало строки: ключ — после `{` или запятой в объекте, иначе значение.
+ */
+const startString = (scan: ArgumentsScan) => {
+  scan.isInString = true;
+  scan.isKey = scan.isKeyNext;
+  scan.isKeyNext = false;
+
+  if (scan.isKey) {
+    scan.keyText = '';
+
+    return;
+  }
+
+  scan.shouldCheckRepeat = !FILE_CONTENT_KEYS.has(scan.key);
+  scan.recent = [];
+  scan.periodRuns = [];
+};
+
+/**
+ * Продвигает лексер по очередной порции аргументов и возвращает вид петли, если она случилась
+ * хотя бы раз внутри порции: проверка только в конце пропустила бы серию, за которой в той же
  * порции пришёл другой символ.
  */
-export const scanArguments = (scan: ArgumentsScan, delta: string, limit: number) => {
-  let hasLoop = false;
+export const scanArguments = (
+  scan: ArgumentsScan,
+  delta: string,
+  limit: number,
+  repeatLimit = REPEAT_RUN_LIMIT
+): LoopKind | undefined => {
+  let loop: LoopKind | undefined;
 
   for (const char of delta) {
     if (scan.isInString) {
-      if (scan.isEscaped) {
-        scan.isEscaped = false;
-      } else if (char === '\\') {
-        scan.isEscaped = true;
-      } else if (char === '"') {
-        scan.isInString = false;
+      if (scanStringChar(scan, char, repeatLimit)) {
+        loop ||= 'repeat';
       }
 
       continue;
@@ -44,7 +164,10 @@ export const scanArguments = (scan: ArgumentsScan, delta: string, limit: number)
 
     if (WHITESPACE.has(char)) {
       scan.whitespaceRun += 1;
-      hasLoop ||= scan.whitespaceRun > limit;
+
+      if (scan.whitespaceRun > limit) {
+        loop ||= 'whitespace';
+      }
 
       continue;
     }
@@ -53,31 +176,41 @@ export const scanArguments = (scan: ArgumentsScan, delta: string, limit: number)
 
     switch (char) {
       case '"': {
-        scan.isInString = true;
+        startString(scan);
         break;
       }
 
       case '{':
 
       case '[': {
-        scan.depth += 1;
+        scan.containers += char;
+        scan.isKeyNext = char === '{';
         break;
       }
 
       case '}':
 
       case ']': {
-        scan.depth -= 1;
+        scan.containers = scan.containers.slice(0, -1);
+        scan.isKeyNext = false;
+        break;
+      }
+
+      case ',': {
+        scan.isKeyNext = scan.containers.endsWith('{');
         break;
       }
 
       default: {
+        scan.isKeyNext = false;
         break;
       }
     }
+
+    scan.depth = scan.containers.length;
   }
 
-  return hasLoop;
+  return loop;
 };
 
 /**
@@ -107,8 +240,10 @@ export const sse = (type: string, data: object) => {
 };
 
 /**
- * Оборачивает SSE-поток Responses API от Codex: при петле пробелов в аргументах вызова инструмента
- * закрывает поток сам и отменяет upstream, чтобы клиент не ждал бесконечно, а токены не тратились.
+ * Оборачивает SSE-поток Responses API от Codex: при петле в аргументах вызова инструмента — пробелах
+ * вне строк или повторе текста внутри строки — закрывает поток сам и отменяет upstream, чтобы клиент
+ * не ждал бесконечно, а токены не тратились. Петля повтора всегда внутри строки, такие аргументы не
+ * дописаны и завершаются ошибкой.
  *
  * Дописанные целиком аргументы отдаются клиенту завершённым вызовом (`response.completed`,
  * клиент выполняет инструмент), если других незавершённых вызовов нет; иначе ответ завершается
@@ -117,7 +252,11 @@ export const sse = (type: string, data: object) => {
  */
 export const guardToolArguments = (
   body: ReadableStream<Uint8Array>,
-  { limit = WHITESPACE_RUN_LIMIT, onTrip }: GuardToolArgumentsOptions = {}
+  {
+    limit = WHITESPACE_RUN_LIMIT,
+    repeatLimit = REPEAT_RUN_LIMIT,
+    onTrip,
+  }: GuardToolArgumentsOptions = {}
 ) => {
   const reader = body.getReader();
   const decoder = new TextDecoder();
@@ -131,7 +270,7 @@ export const guardToolArguments = (
   let response: Record<string, unknown> = {};
   let pending = '';
 
-  const trip = (itemId: string, call: ToolCall) => {
+  const trip = (itemId: string, call: ToolCall, kind: LoopKind) => {
     /**
      * Параллельный вызов, ещё не дописанный к моменту петли, в завершённый ответ не попадёт: клиент
      * получил бы его оборванным. Такой ответ завершается ошибкой целиком.
@@ -145,6 +284,7 @@ export const guardToolArguments = (
     onTrip?.({
       at: new Date().toISOString(),
       tool,
+      kind,
       whitespace: call.scan.whitespaceRun,
       depth: call.scan.depth,
       isRepaired: Boolean(input),
@@ -153,9 +293,10 @@ export const guardToolArguments = (
     const { id, object, model, created_at: createdAt } = response;
 
     if (!input) {
+      const { code, text } = LOOP_ERRORS[kind];
       const error = {
-        code: LOOP_ERROR_CODE,
-        message: `Codex looped on whitespace in ${tool || 'tool'} arguments; the response was stopped. Retry the request.`,
+        code,
+        message: `Codex looped on ${text} in ${tool || 'tool'} arguments; the response was stopped. Retry the request.`,
       };
 
       /**
@@ -270,8 +411,9 @@ export const guardToolArguments = (
         }
 
         call.arguments += delta;
+        const loop = scanArguments(call.scan, delta, limit, repeatLimit);
 
-        return scanArguments(call.scan, delta, limit) ? trip(itemId, call) : undefined;
+        return loop ? trip(itemId, call, loop) : undefined;
       }
 
       default: {
