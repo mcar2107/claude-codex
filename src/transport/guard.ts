@@ -1,11 +1,6 @@
 import { isRecord } from '../state';
 
-import type {
-  ArgumentsScan,
-  GuardToolArgumentsOptions,
-  RepairedArguments,
-  ToolCall,
-} from './guard.types';
+import type { ArgumentsScan, GuardToolArgumentsOptions, ToolCall } from './guard.types';
 
 /**
  * Сколько пробельных символов подряд вне строк JSON считается петлёй. Между токенами отступы
@@ -23,7 +18,7 @@ const LOOP_ERROR_CODE = 'tool_arguments_whitespace_loop';
 const WHITESPACE = new Set([' ', '\n', '\r', '\t']);
 
 export const createScan = (): ArgumentsScan => {
-  return { isInString: false, isEscaped: false, closing: '', whitespaceRun: 0 };
+  return { isInString: false, isEscaped: false, depth: 0, whitespaceRun: 0 };
 };
 
 /**
@@ -62,20 +57,17 @@ export const scanArguments = (scan: ArgumentsScan, delta: string, limit: number)
         break;
       }
 
-      case '{': {
-        scan.closing = '}' + scan.closing;
-        break;
-      }
+      case '{':
 
       case '[': {
-        scan.closing = ']' + scan.closing;
+        scan.depth += 1;
         break;
       }
 
       case '}':
 
       case ']': {
-        scan.closing = scan.closing.slice(1);
+        scan.depth -= 1;
         break;
       }
 
@@ -89,29 +81,28 @@ export const scanArguments = (scan: ArgumentsScan, delta: string, limit: number)
 };
 
 /**
- * Закрывает аргументы, оборванные петлёй: дописывает незакрытые скобки. Петля внутри строки, после
- * ключа или запятой — не чинится: дописанный хвост угадывал бы за модель.
+ * Аргументы вызова, если модель дописала их целиком и ушла в петлю вместо конца вызова: объект
+ * верхнего уровня закрыт, к аргументам не дописывается ни символа. Петля внутри объекта не
+ * чинится: закрыть его скобками можно, но так молча пропали бы параметры и элементы массивов,
+ * которые модель не успела дописать, и инструмент выполнился бы не с теми аргументами.
  */
-export const repairArguments = (
-  args: string,
-  scan: ArgumentsScan
-): RepairedArguments | undefined => {
-  if (scan.isInString) {
+export const repairArguments = (args: string, scan: ArgumentsScan) => {
+  if (scan.isInString || scan.depth > 0) {
     return undefined;
   }
 
   let input: unknown;
 
   try {
-    input = JSON.parse(args + scan.closing);
+    input = JSON.parse(args);
   } catch {
     return undefined;
   }
 
-  return isRecord(input) ? { closing: scan.closing, input } : undefined;
+  return isRecord(input) ? input : undefined;
 };
 
-const sse = (type: string, data: object) => {
+export const sse = (type: string, data: object) => {
   return `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
 };
 
@@ -119,8 +110,9 @@ const sse = (type: string, data: object) => {
  * Оборачивает SSE-поток Responses API от Codex: при петле пробелов в аргументах вызова инструмента
  * закрывает поток сам и отменяет upstream, чтобы клиент не ждал бесконечно, а токены не тратились.
  *
- * Аргументы, которые закрываются скобками, отдаются клиенту завершённым вызовом
- * (`response.completed`, клиент выполняет инструмент); остальные — событием `error`.
+ * Дописанные целиком аргументы отдаются клиенту завершённым вызовом (`response.completed`,
+ * клиент выполняет инструмент), если других незавершённых вызовов нет; иначе ответ завершается
+ * ошибкой.
  * Без срабатывания поток проходит без изменений.
  */
 export const guardToolArguments = (
@@ -140,39 +132,61 @@ export const guardToolArguments = (
   let pending = '';
 
   const trip = (itemId: string, call: ToolCall) => {
-    const repaired = repairArguments(call.arguments, call.scan);
+    /**
+     * Параллельный вызов, ещё не дописанный к моменту петли, в завершённый ответ не попадёт: клиент
+     * получил бы его оборванным. Такой ответ завершается ошибкой целиком.
+     */
+    const hasOtherOpenCalls = calls.size > 1;
+    const input = hasOtherOpenCalls
+      ? undefined
+      : repairArguments(call.arguments, call.scan);
     const tool = typeof call.item.name === 'string' ? call.item.name : '';
 
     onTrip?.({
       at: new Date().toISOString(),
       tool,
       whitespace: call.scan.whitespaceRun,
-      isRepaired: Boolean(repaired),
+      depth: call.scan.depth,
+      isRepaired: Boolean(input),
     });
 
-    if (!repaired) {
-      return sse('error', {
+    const { id, object, model, created_at: createdAt } = response;
+
+    if (!input) {
+      const error = {
         code: LOOP_ERROR_CODE,
         message: `Codex looped on whitespace in ${tool || 'tool'} arguments; the response was stopped. Retry the request.`,
-      });
+      };
+
+      /**
+       * `error` завершает стрим клиента. Нестриминговый ответ собирается из
+       * `response.completed`: без него клиент получил бы пустой успешный ответ, а статус `failed`
+       * превращает его в ошибку.
+       */
+      return (
+        sse('error', error) +
+        sse('response.completed', {
+          response: {
+            id,
+            object,
+            model,
+            created_at: createdAt,
+            status: 'failed',
+            error,
+            output: doneItems,
+          },
+        })
+      );
     }
 
-    const { id, object, model, created_at: createdAt } = response;
     const { outputIndex } = call;
     const item = {
       ...call.item,
-      arguments: JSON.stringify(repaired.input),
+      arguments: JSON.stringify(input),
       status: 'completed',
     };
 
     return [
-      repaired.closing
-        ? sse('response.function_call_arguments.delta', {
-            item_id: itemId,
-            output_index: outputIndex,
-            delta: repaired.closing,
-          })
-        : '',
       sse('response.function_call_arguments.done', {
         item_id: itemId,
         output_index: outputIndex,
