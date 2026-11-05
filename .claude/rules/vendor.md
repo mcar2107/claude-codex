@@ -27,3 +27,7 @@ paths:
    `bun run typecheck`, `bun run test`, `bun run build`.
 5. **Сверка хешей** — `scripts/verify-vendor.ts`: `bun run lint:vendor` и первый шаг `bun run build` (а с ним
    standalone и релиза). Расхождение с `original-sha256.json` роняет сборку списком файлов.
+6. **Свои трансформеры** регистрируются в `server.ts`; порядок в `transformer.use` задаёт и цепочку ответа — в обратном
+   порядке. `local-codex-guard` и `local-codex-limits` стоят последними (фаза `headers`), поэтому первыми видят сырой
+   SSE Responses от Codex. Обёртка потока ответа обязана в каждом `pull` положить данные или закрыть поток: `pull`, который
+   ничего не положил, поток больше не вызовет (`guard.ts`).

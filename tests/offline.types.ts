@@ -59,6 +59,26 @@ export type CancellationProbe = {
 };
 
 /**
+ * Поток, который мок Codex отдаёт кадрами как есть.
+ */
+export type MockStream = {
+  /**
+   * Кадры SSE.
+   */
+  frames: string[];
+
+  /**
+   * Поток закрывается после кадров; иначе висит, как Codex в петле.
+   */
+  isClosed: boolean;
+
+  /**
+   * Отметка, что транспорт отменил поток.
+   */
+  probe: CancellationProbe;
+};
+
+/**
  * Элемент `output` ответа Responses.
  */
 export type ResponseOutputItem = {
